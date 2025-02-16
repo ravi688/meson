@@ -51,7 +51,7 @@ except ImportError:
 REQ_TIMEOUT = 30.0
 WHITELIST_SUBDOMAIN = 'wrapdb.mesonbuild.com'
 
-ALL_TYPES = ['file', 'git', 'hg', 'svn', 'redirect']
+ALL_TYPES = ['file', 'path', 'git', 'hg', 'svn', 'redirect']
 
 PATCH = shutil.which('patch')
 
@@ -191,13 +191,6 @@ class PackageDefinition:
             # file we should parse instead. It must be relative to the current
             # wrap file location and must be in the form foo/subprojects/bar.wrap.
             fname = Path(values['filename'])
-            for i, p in enumerate(fname.parts):
-                if i % 2 == 0:
-                    if p == '..':
-                        raise WrapException('wrap-redirect filename cannot contain ".."')
-                else:
-                    if p != 'subprojects':
-                        raise WrapException('wrap-redirect filename must be in the form foo/subprojects/bar.wrap')
             if fname.suffix != '.wrap':
                 raise WrapException('wrap-redirect filename must be a .wrap file')
             fname = Path(subprojects_dir, fname)
@@ -512,6 +505,13 @@ class Resolver:
                     self._get_hg()
                 elif self.wrap.type == "svn":
                     self._get_svn()
+                elif self.wrap.type == 'path':
+                    path = self.wrap.values.get('path')
+                    if not os.path.isabs(path):
+                        self.dirname = os.path.join(self.source_dir, path)
+                    else:
+                        self.dirname = path
+                    rel_path = os.path.relpath(self.dirname, self.source_dir)
                 else:
                     raise WrapException(f'Unknown wrap type {self.wrap.type!r}')
             try:
