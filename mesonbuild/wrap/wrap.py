@@ -508,7 +508,7 @@ class Resolver:
                 elif self.wrap.type == 'path':
                     path = self.wrap.values.get('path')
                     if not os.path.isabs(path):
-                        self.dirname = os.path.join(self.source_dir, path)
+                        self.dirname = os.path.join(self.wrap.subprojects_dir, path)
                     else:
                         self.dirname = path
                     rel_path = os.path.relpath(self.dirname, self.source_dir)
