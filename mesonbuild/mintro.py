@@ -164,7 +164,7 @@ def list_install_plan(installdata: backends.InstallData) -> T.Dict[str, T.Dict[s
     return plan
 
 def get_target_dir(coredata: cdata.CoreData, subdir: str) -> str:
-    if coredata.get_option(OptionKey('layout')) == 'flat':
+    if coredata.optstore.get_value_for(OptionKey('layout')) == 'flat':
         return 'meson-out'
     else:
         return subdir
@@ -304,7 +304,7 @@ def list_buildoptions(coredata: cdata.CoreData, subprojects: T.Optional[T.List[s
                 for s in subprojects:
                     core_options[k.evolve(subproject=s)] = v
 
-    def add_keys(opts: T.Union[cdata.MutableKeyedOptionDictType, cdata.KeyedOptionDictType], section: str) -> None:
+    def add_keys(opts: T.Union[cdata.MutableKeyedOptionDictType, options.OptionStore], section: str) -> None:
         for key, opt in sorted(opts.items()):
             optdict = {'name': str(key), 'value': opt.value, 'section': section,
                        'machine': key.machine.get_lower_case_name() if coredata.is_per_machine_option(key) else 'any'}

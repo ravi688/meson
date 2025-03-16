@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2021 The Meson development team
-# Copyright © 2024 Intel Corporation
+# Copyright © 2024-2025 Intel Corporation
 
 from __future__ import annotations
 import json
@@ -167,21 +167,25 @@ class PlatformAgnosticTests(BasePlatformTests):
         self.init(testdir)
 
         # no-op change works
-        self.setconf(f'--backend=ninja')
-        self.init(testdir, extra_args=['--reconfigure', '--backend=ninja'])
+        with self.subTest('set the option to the same value'):
+            self.setconf('--backend=ninja')
+            self.init(testdir, extra_args=['--reconfigure', '--backend=ninja'])
 
         # Change backend option is not allowed
-        with self.assertRaises(subprocess.CalledProcessError) as cm:
-            self.setconf('-Dbackend=none')
-        self.assertIn("ERROR: Tried to modify read only option 'backend'", cm.exception.stdout)
+        with self.subTest('Changing the backend'):
+            with self.assertRaises(subprocess.CalledProcessError) as cm:
+                self.setconf('-Dbackend=none')
+            self.assertIn("ERROR: Tried to modify read only option 'backend'", cm.exception.stdout)
 
         # Check that the new value was not written in the store.
-        self.assertEqual(self.getconf('backend'), 'ninja')
+        with self.subTest('option is stored correctly'):
+            self.assertEqual(self.getconf('backend'), 'ninja')
 
         # Wipe with a different backend is allowed
-        self.init(testdir, extra_args=['--wipe', '--backend=none'])
+        with self.subTest('Changing the backend with wipe'):
+            self.init(testdir, extra_args=['--wipe', '--backend=none'])
 
-        self.assertEqual(self.getconf('backend'), 'none')
+            self.assertEqual(self.getconf('backend'), 'none')
 
     def test_validate_dirs(self):
         testdir = os.path.join(self.common_test_dir, '1 trivial')
@@ -415,9 +419,15 @@ class PlatformAgnosticTests(BasePlatformTests):
     def test_setup_with_unknown_option(self):
         testdir = os.path.join(self.common_test_dir, '1 trivial')
 
-        for option in ('not_an_option', 'b_not_an_option'):
-            out = self.init(testdir, extra_args=['--wipe', f'-D{option}=1'], allow_fail=True)
-            self.assertIn(f'ERROR: Unknown options: "{option}"', out)
+        with self.subTest('unknown user option'):
+            out = self.init(testdir, extra_args=['-Dnot_an_option=1'], allow_fail=True)
+            self.assertIn('ERROR: Unknown options: "not_an_option"', out)
+
+        with self.subTest('unknown builtin option'):
+            self.new_builddir()
+            out = self.init(testdir, extra_args=['-Db_not_an_option=1'], allow_fail=True)
+            self.assertIn('ERROR: Unknown options: "b_not_an_option"', out)
+
 
     def test_configure_new_option(self) -> None:
         """Adding a new option without reconfiguring should work."""
@@ -441,7 +451,7 @@ class PlatformAgnosticTests(BasePlatformTests):
                 f.write(line)
         with self.assertRaises(subprocess.CalledProcessError) as e:
             self.setconf('-Dneg_int_opt=0')
-        self.assertIn('Unknown options: "neg_int_opt"', e.exception.stdout)
+        self.assertIn('Unknown options: ":neg_int_opt"', e.exception.stdout)
 
     def test_configure_option_changed_constraints(self) -> None:
         """Changing the constraints of an option without reconfiguring should work."""
@@ -481,7 +491,7 @@ class PlatformAgnosticTests(BasePlatformTests):
         os.unlink(os.path.join(testdir, 'meson_options.txt'))
         with self.assertRaises(subprocess.CalledProcessError) as e:
             self.setconf('-Dneg_int_opt=0')
-        self.assertIn('Unknown options: "neg_int_opt"', e.exception.stdout)
+        self.assertIn('Unknown options: ":neg_int_opt"', e.exception.stdout)
 
     def test_configure_options_file_added(self) -> None:
         """A new project option file should be detected."""

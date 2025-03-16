@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2012-2022 The Meson development team
+# Copyright © 2023 Intel Corporation
 
 from __future__ import annotations
 
@@ -223,7 +224,7 @@ class DynamicLinker(metaclass=abc.ABCMeta):
     def get_thinlto_cache_args(self, path: str) -> T.List[str]:
         return []
 
-    def sanitizer_args(self, value: str) -> T.List[str]:
+    def sanitizer_args(self, value: T.List[str]) -> T.List[str]:
         return []
 
     def get_asneeded_args(self) -> T.List[str]:
@@ -599,6 +600,9 @@ class PosixDynamicLinkerMixin(DynamicLinkerBase):
     def get_search_args(self, dirname: str) -> T.List[str]:
         return ['-L' + dirname]
 
+    def sanitizer_args(self, value: T.List[str]) -> T.List[str]:
+        return []
+
 
 class GnuLikeDynamicLinkerMixin(DynamicLinkerBase):
 
@@ -654,10 +658,10 @@ class GnuLikeDynamicLinkerMixin(DynamicLinkerBase):
     def get_lto_args(self) -> T.List[str]:
         return ['-flto']
 
-    def sanitizer_args(self, value: str) -> T.List[str]:
-        if value == 'none':
-            return []
-        return ['-fsanitize=' + value]
+    def sanitizer_args(self, value: T.List[str]) -> T.List[str]:
+        if not value:
+            return value
+        return [f'-fsanitize={",".join(value)}']
 
     def get_coverage_args(self) -> T.List[str]:
         return ['--coverage']
@@ -744,10 +748,15 @@ class GnuLikeDynamicLinkerMixin(DynamicLinkerBase):
             return (args, rpath_dirs_to_remove)
 
         # Rpaths to use while linking must be absolute. These are not
-        # written to the binary. Needed only with GNU ld:
+        # written to the binary. Needed only with GNU ld, and only for
+        # versions before 2.28:
+        # https://sourceware.org/bugzilla/show_bug.cgi?id=20535
         # https://sourceware.org/bugzilla/show_bug.cgi?id=16936
         # Not needed on Windows or other platforms that don't use RPATH
         # https://github.com/mesonbuild/meson/issues/1897
+        #
+        # In 2.28 and on, $ORIGIN tokens inside of -rpath are respected,
+        # so we do not need to duplicate it in -rpath-link.
         #
         # In addition, this linker option tends to be quite long and some
         # compilers have trouble dealing with it. That's why we will include
@@ -758,8 +767,9 @@ class GnuLikeDynamicLinkerMixin(DynamicLinkerBase):
         # ...instead of just one single looooong option, like this:
         #
         #   -Wl,-rpath-link,/path/to/folder1:/path/to/folder2:...
-        for p in rpath_paths:
-            args.extend(self._apply_prefix('-rpath-link,' + os.path.join(build_dir, p)))
+        if self.id in {'ld.bfd', 'ld.gold'} and mesonlib.version_compare(self.version, '<2.28'):
+            for p in rpath_paths:
+                args.extend(self._apply_prefix('-rpath-link,' + os.path.join(build_dir, p)))
 
         return (args, rpath_dirs_to_remove)
 
@@ -811,10 +821,10 @@ class AppleDynamicLinker(PosixDynamicLinkerMixin, DynamicLinker):
     def get_coverage_args(self) -> T.List[str]:
         return ['--coverage']
 
-    def sanitizer_args(self, value: str) -> T.List[str]:
-        if value == 'none':
-            return []
-        return ['-fsanitize=' + value]
+    def sanitizer_args(self, value: T.List[str]) -> T.List[str]:
+        if not value:
+            return value
+        return [f'-fsanitize={",".join(value)}']
 
     def no_undefined_args(self) -> T.List[str]:
         # We used to emit -undefined,error, but starting with Xcode 15 /

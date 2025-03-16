@@ -28,7 +28,8 @@ from ..compilers import LANGUAGES_USING_LDFLAGS, detect, lang_suffixes
 from ..mesonlib import (
     File, MachineChoice, MesonException, MesonBugException, OrderedSet,
     ExecutableSerialisation, EnvironmentException,
-    classify_unity_sources, get_compiler_for_source
+    classify_unity_sources, get_compiler_for_source,
+    is_parent_path,
 )
 from ..options import OptionKey
 
@@ -41,6 +42,7 @@ if T.TYPE_CHECKING:
     from ..interpreter import Interpreter, Test
     from ..linkers.linkers import StaticLinker
     from ..mesonlib import FileMode, FileOrString
+    from ..options import ElementaryOptionValues
 
     from typing_extensions import TypedDict, NotRequired
 
@@ -371,7 +373,7 @@ class Backend:
         if isinstance(target, build.RunTarget):
             # this produces no output, only a dummy top-level name
             dirname = ''
-        elif self.environment.coredata.get_option(OptionKey('layout')) == 'mirror':
+        elif self.environment.coredata.optstore.get_value_for(OptionKey('layout')) == 'mirror':
             dirname = target.get_subdir()
         else:
             dirname = 'meson-out'
@@ -796,12 +798,7 @@ class Backend:
                 ):
                     continue
 
-                try:
-                    commonpath = os.path.commonpath((libdir, srcdir))
-                except ValueError: # when paths are on different drives on Windows
-                    commonpath = ''
-
-                if commonpath == srcdir:
+                if is_parent_path(srcdir, libdir):
                     rel_to_src = libdir[len(srcdir) + 1:]
                     assert not os.path.isabs(rel_to_src), f'rel_to_src: {rel_to_src} is absolute'
                     paths.add(os.path.join(self.build_to_src, rel_to_src))
@@ -818,7 +815,7 @@ class Backend:
     def determine_rpath_dirs(self, target: T.Union[build.BuildTarget, build.CustomTarget, build.CustomTargetIndex]
                              ) -> T.Tuple[str, ...]:
         result: OrderedSet[str]
-        if self.environment.coredata.get_option(OptionKey('layout')) == 'mirror':
+        if self.environment.coredata.optstore.get_value_for(OptionKey('layout')) == 'mirror':
             # Need a copy here
             result = OrderedSet(target.get_link_dep_subdirs())
         else:
@@ -832,7 +829,9 @@ class Backend:
     @staticmethod
     @lru_cache(maxsize=None)
     def canonicalize_filename(fname: str) -> str:
-        parts = Path(fname).parts
+        if os.path.altsep is not None:
+            fname = fname.replace(os.path.altsep, os.path.sep)
+        parts = fname.split(os.path.sep)
         hashed = ''
         if len(parts) > 5:
             temp = '/'.join(parts[-5:])
@@ -1199,14 +1198,14 @@ class Backend:
         result: T.Set[str] = set()
         prospectives: T.Set[build.BuildTargetTypes] = set()
         if isinstance(target, build.BuildTarget):
-            prospectives.update(target.get_transitive_link_deps())
+            prospectives.update(target.get_all_link_deps())
             # External deps
             result.update(self.extract_dll_paths(target))
 
         for bdep in extra_bdeps:
             prospectives.add(bdep)
             if isinstance(bdep, build.BuildTarget):
-                prospectives.update(bdep.get_transitive_link_deps())
+                prospectives.update(bdep.get_all_link_deps())
         # Internal deps
         for ld in prospectives:
             dirseg = os.path.join(self.environment.get_build_dir(), self.get_target_dir(ld))
@@ -1336,7 +1335,7 @@ class Backend:
     def generate_depmf_install(self, d: InstallData) -> None:
         depmf_path = self.build.dep_manifest_name
         if depmf_path is None:
-            option_dir = self.environment.coredata.get_option(OptionKey('licensedir'))
+            option_dir = self.environment.coredata.optstore.get_value_for(OptionKey('licensedir'))
             assert isinstance(option_dir, str), 'for mypy'
             if option_dir:
                 depmf_path = os.path.join(option_dir, 'depmf.json')
@@ -1667,7 +1666,7 @@ class Backend:
                 # TODO go through all candidates, like others
                 strip_bin = [detect.defaults['strip'][0]]
 
-        umask = self.environment.coredata.get_option(OptionKey('install_umask'))
+        umask = self.environment.coredata.optstore.get_value_for(OptionKey('install_umask'))
         assert isinstance(umask, (str, int)), 'for mypy'
 
         d = InstallData(self.environment.get_source_dir(),
@@ -1699,7 +1698,7 @@ class Backend:
         bindir = Path(prefix, self.environment.get_bindir())
         libdir = Path(prefix, self.environment.get_libdir())
         incdir = Path(prefix, self.environment.get_includedir())
-        _ldir = self.environment.coredata.get_option(OptionKey('localedir'))
+        _ldir = self.environment.coredata.optstore.get_value_for(OptionKey('localedir'))
         assert isinstance(_ldir, str), 'for mypy'
         localedir = Path(prefix, _ldir)
         dest_path = Path(prefix, outdir, Path(fname).name) if outdir else Path(prefix, fname)
@@ -2105,7 +2104,7 @@ class Backend:
             return target.subproject != ''
         raise MesonException(f'Internal error: invalid option type for "unity": {val}')
 
-    def get_target_option(self, target: build.BuildTarget, name: T.Union[str, OptionKey]) -> T.Union[str, int, bool, T.List[str]]:
+    def get_target_option(self, target: build.BuildTarget, name: T.Union[str, OptionKey]) -> ElementaryOptionValues:
         if isinstance(name, str):
             key = OptionKey(name, subproject=target.subproject)
         elif isinstance(name, OptionKey):

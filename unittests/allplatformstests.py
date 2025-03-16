@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2016-2021 The Meson development team
+# Copyright © 2023-2024 Intel Corporation
 
 import subprocess
 import re
@@ -334,7 +335,8 @@ class AllPlatformTests(BasePlatformTests):
                 name = opt['name']
                 value = opt['value']
                 if name in expected[prefix]:
-                    self.assertEqual(value, expected[prefix][name], f'For option {name} and prefix {prefix}.')
+                    with self.subTest(prefix=prefix, option=name):
+                        self.assertEqual(value, expected[prefix][name], f'For option {name} and prefix {prefix}.')
             self.wipe()
 
     def test_default_options_prefix_dependent_defaults(self):
@@ -2769,7 +2771,7 @@ class AllPlatformTests(BasePlatformTests):
             obj = mesonbuild.coredata.load(self.builddir)
             self.assertEqual(obj.optstore.get_value('bindir'), 'bar')
             self.assertEqual(obj.optstore.get_value('buildtype'), 'release')
-            self.assertEqual(obj.optstore.get_value('b_sanitize'), 'thread')
+            self.assertEqual(obj.optstore.get_value('b_sanitize'), ['thread'])
             self.assertEqual(obj.optstore.get_value(OptionKey('c_args')), ['-Dbar'])
             self.setconf(['--bindir=bar', '--bindir=foo',
                           '-Dbuildtype=release', '-Dbuildtype=plain',
@@ -2778,7 +2780,7 @@ class AllPlatformTests(BasePlatformTests):
             obj = mesonbuild.coredata.load(self.builddir)
             self.assertEqual(obj.optstore.get_value('bindir'), 'foo')
             self.assertEqual(obj.optstore.get_value('buildtype'), 'plain')
-            self.assertEqual(obj.optstore.get_value('b_sanitize'), 'address')
+            self.assertEqual(obj.optstore.get_value('b_sanitize'), ['address'])
             self.assertEqual(obj.optstore.get_value(OptionKey('c_args')), ['-Dfoo'])
             self.wipe()
         except KeyError:
@@ -3397,100 +3399,100 @@ class AllPlatformTests(BasePlatformTests):
                 src_to_id.update({os.path.relpath(src, testdir): i['id']
                                   for src in group.get('sources', [])})
 
-        # Check Tests and benchmarks
-        tests_to_find = ['test case 1', 'test case 2', 'benchmark 1']
-        deps_to_find = {'test case 1': [src_to_id['t1.cpp']],
-                        'test case 2': [src_to_id['t2.cpp'], src_to_id['t3.cpp']],
-                        'benchmark 1': [out_to_id['file2'], out_to_id['file3'], out_to_id['file4'], src_to_id['t3.cpp']]}
-        for i in res['benchmarks'] + res['tests']:
-            assertKeyTypes(test_keylist, i)
-            if i['name'] in tests_to_find:
-                tests_to_find.remove(i['name'])
-            self.assertEqual(sorted(i['depends']),
-                             sorted(deps_to_find[i['name']]))
-        self.assertListEqual(tests_to_find, [])
+        with self.subTest('Check Tests and Benchmarks'):
+            tests_to_find = ['test case 1', 'test case 2', 'benchmark 1']
+            deps_to_find = {'test case 1': [src_to_id['t1.cpp']],
+                            'test case 2': [src_to_id['t2.cpp'], src_to_id['t3.cpp']],
+                            'benchmark 1': [out_to_id['file2'], out_to_id['file3'], out_to_id['file4'], src_to_id['t3.cpp']]}
+            for i in res['benchmarks'] + res['tests']:
+                assertKeyTypes(test_keylist, i)
+                if i['name'] in tests_to_find:
+                    tests_to_find.remove(i['name'])
+                self.assertEqual(sorted(i['depends']),
+                                sorted(deps_to_find[i['name']]))
+            self.assertListEqual(tests_to_find, [])
 
-        # Check buildoptions
-        buildopts_to_find = {'cpp_std': 'c++11'}
-        for i in res['buildoptions']:
-            assertKeyTypes(buildoptions_keylist, i)
-            valid_type = False
-            for j in buildoptions_typelist:
-                if i['type'] == j[0]:
-                    self.assertIsInstance(i['value'], j[1])
-                    assertKeyTypes(j[2], i, strict=False)
-                    valid_type = True
-                    break
+        with self.subTest('Check buildoptions'):
+            buildopts_to_find = {'cpp_std': 'c++11'}
+            for i in res['buildoptions']:
+                assertKeyTypes(buildoptions_keylist, i)
+                valid_type = False
+                for j in buildoptions_typelist:
+                    if i['type'] == j[0]:
+                        self.assertIsInstance(i['value'], j[1])
+                        assertKeyTypes(j[2], i, strict=False)
+                        valid_type = True
+                        break
 
-            self.assertIn(i['section'], buildoptions_sections)
-            self.assertIn(i['machine'], buildoptions_machines)
-            self.assertTrue(valid_type)
-            if i['name'] in buildopts_to_find:
-                self.assertEqual(i['value'], buildopts_to_find[i['name']])
-                buildopts_to_find.pop(i['name'], None)
-        self.assertDictEqual(buildopts_to_find, {})
+                self.assertIn(i['section'], buildoptions_sections)
+                self.assertIn(i['machine'], buildoptions_machines)
+                self.assertTrue(valid_type)
+                if i['name'] in buildopts_to_find:
+                    self.assertEqual(i['value'], buildopts_to_find[i['name']])
+                    buildopts_to_find.pop(i['name'], None)
+            self.assertDictEqual(buildopts_to_find, {})
 
-        # Check buildsystem_files
-        bs_files = ['meson.build', 'meson_options.txt', 'sharedlib/meson.build', 'staticlib/meson.build']
-        bs_files = [os.path.join(testdir, x) for x in bs_files]
-        self.assertPathListEqual(list(sorted(res['buildsystem_files'])), list(sorted(bs_files)))
+        with self.subTest('Check buildsystem_files'):
+            bs_files = ['meson.build', 'meson_options.txt', 'sharedlib/meson.build', 'staticlib/meson.build']
+            bs_files = [os.path.join(testdir, x) for x in bs_files]
+            self.assertPathListEqual(list(sorted(res['buildsystem_files'])), list(sorted(bs_files)))
 
-        # Check dependencies
-        dependencies_to_find = ['threads']
-        for i in res['dependencies']:
-            assertKeyTypes(dependencies_typelist, i)
-            if i['name'] in dependencies_to_find:
-                dependencies_to_find.remove(i['name'])
-        self.assertListEqual(dependencies_to_find, [])
+        with self.subTest('Check dependencies'):
+            dependencies_to_find = ['threads']
+            for i in res['dependencies']:
+                assertKeyTypes(dependencies_typelist, i)
+                if i['name'] in dependencies_to_find:
+                    dependencies_to_find.remove(i['name'])
+            self.assertListEqual(dependencies_to_find, [])
 
-        # Check projectinfo
-        self.assertDictEqual(res['projectinfo'], {
-            'version': '1.2.3',
-            'license': ['unknown'],
-            'license_files': [],
-            'descriptive_name': 'introspection',
-            'subproject_dir': 'subprojects',
-            'subprojects': []
-        })
+        with self.subTest('Check projectinfo'):
+            self.assertDictEqual(res['projectinfo'], {
+                'version': '1.2.3',
+                'license': ['unknown'],
+                'license_files': [],
+                'descriptive_name': 'introspection',
+                'subproject_dir': 'subprojects',
+                'subprojects': []
+            })
 
-        # Check targets
-        targets_to_find = {
-            'sharedTestLib': ('shared library', True, False, 'sharedlib/meson.build',
-                              [os.path.join(testdir, 'sharedlib', 'shared.cpp')]),
-            'staticTestLib': ('static library', True, False, 'staticlib/meson.build',
-                              [os.path.join(testdir, 'staticlib', 'static.c')]),
-            'custom target test 1': ('custom', False, False, 'meson.build',
-                                     [os.path.join(testdir, 'cp.py')]),
-            'custom target test 2': ('custom', False, False, 'meson.build',
-                                     name_to_out['custom target test 1']),
-            'test1': ('executable', True, True, 'meson.build',
-                      [os.path.join(testdir, 't1.cpp')]),
-            'test2': ('executable', True, False, 'meson.build',
-                      [os.path.join(testdir, 't2.cpp')]),
-            'test3': ('executable', True, False, 'meson.build',
-                      [os.path.join(testdir, 't3.cpp')]),
-            'custom target test 3': ('custom', False, False, 'meson.build',
-                                     name_to_out['test3']),
-        }
-        for i in res['targets']:
-            assertKeyTypes(targets_typelist, i)
-            if i['name'] in targets_to_find:
-                tgt = targets_to_find[i['name']]
-                self.assertEqual(i['type'], tgt[0])
-                self.assertEqual(i['build_by_default'], tgt[1])
-                self.assertEqual(i['installed'], tgt[2])
-                self.assertPathEqual(i['defined_in'], os.path.join(testdir, tgt[3]))
-                targets_to_find.pop(i['name'], None)
-            for j in i['target_sources']:
-                if 'compiler' in j:
-                    if j['language'] == 'unknown':
-                        assertKeyTypes(targets_sources_unknown_lang_typelist, j)
+        with self.subTest('Check targets'):
+            targets_to_find = {
+                'sharedTestLib': ('shared library', True, False, 'sharedlib/meson.build',
+                                [os.path.join(testdir, 'sharedlib', 'shared.cpp')]),
+                'staticTestLib': ('static library', True, False, 'staticlib/meson.build',
+                                [os.path.join(testdir, 'staticlib', 'static.c')]),
+                'custom target test 1': ('custom', False, False, 'meson.build',
+                                        [os.path.join(testdir, 'cp.py')]),
+                'custom target test 2': ('custom', False, False, 'meson.build',
+                                        name_to_out['custom target test 1']),
+                'test1': ('executable', True, True, 'meson.build',
+                        [os.path.join(testdir, 't1.cpp')]),
+                'test2': ('executable', True, False, 'meson.build',
+                        [os.path.join(testdir, 't2.cpp')]),
+                'test3': ('executable', True, False, 'meson.build',
+                        [os.path.join(testdir, 't3.cpp')]),
+                'custom target test 3': ('custom', False, False, 'meson.build',
+                                        name_to_out['test3']),
+            }
+            for i in res['targets']:
+                assertKeyTypes(targets_typelist, i)
+                if i['name'] in targets_to_find:
+                    tgt = targets_to_find[i['name']]
+                    self.assertEqual(i['type'], tgt[0])
+                    self.assertEqual(i['build_by_default'], tgt[1])
+                    self.assertEqual(i['installed'], tgt[2])
+                    self.assertPathEqual(i['defined_in'], os.path.join(testdir, tgt[3]))
+                    targets_to_find.pop(i['name'], None)
+                for j in i['target_sources']:
+                    if 'compiler' in j:
+                        if j['language'] == 'unknown':
+                            assertKeyTypes(targets_sources_unknown_lang_typelist, j)
+                        else:
+                            assertKeyTypes(targets_sources_typelist, j)
+                        self.assertEqual(j['sources'], [os.path.normpath(f) for f in tgt[4]])
                     else:
-                        assertKeyTypes(targets_sources_typelist, j)
-                    self.assertEqual(j['sources'], [os.path.normpath(f) for f in tgt[4]])
-                else:
-                    assertKeyTypes(target_sources_linker_typelist, j)
-        self.assertDictEqual(targets_to_find, {})
+                        assertKeyTypes(target_sources_linker_typelist, j)
+            self.assertDictEqual(targets_to_find, {})
 
     def test_introspect_file_dump_equals_all(self):
         testdir = os.path.join(self.unit_test_dir, '56 introspection')
@@ -4483,12 +4485,15 @@ class AllPlatformTests(BasePlatformTests):
 
             # The compiler either invokes the linker or doesn't. Act accordingly.
             with mock.patch.object(cc_type, 'INVOKES_LINKER', True):
+                env.coredata.get_external_link_args.cache_clear()
                 cc =  detect_compiler_for(env, 'c', MachineChoice.HOST, True, '')
                 link_args = env.coredata.get_external_link_args(cc.for_machine, cc.language)
                 self.assertEqual(sorted(link_args), sorted(['-DCFLAG', '-flto']))
 
+
             ## And one that doesn't
             #with mock.patch.object(cc_type, 'INVOKES_LINKER', False):
+            #    env.coredata.get_external_link_args.cache_clear()
             #    cc =  detect_compiler_for(env, 'c', MachineChoice.HOST, True, '')
             #    link_args = env.coredata.get_external_link_args(cc.for_machine, cc.language)
             #    self.assertEqual(sorted(link_args), sorted(['-flto']))
@@ -5130,6 +5135,35 @@ class AllPlatformTests(BasePlatformTests):
     def test_c_cpp_objc_objcpp_stds(self) -> None:
         self.__test_multi_stds(test_objc=True)
 
+    def test_slice(self):
+        testdir = os.path.join(self.unit_test_dir, '124 test slice')
+        self.init(testdir)
+        self.build()
+
+        for arg, expectation in {'1/1': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                                 '1/2': [1, 3, 5, 7, 9],
+                                 '2/2': [2, 4, 6, 8, 10],
+                                 '1/10': [1],
+                                 '2/10': [2],
+                                 '10/10': [10],
+                                 }.items():
+            output = self._run(self.mtest_command + ['--slice=' + arg])
+            tests = sorted([ int(x[5:]) for x in re.findall(r'test-[0-9]*', output) ])
+            self.assertEqual(tests, expectation)
+
+        for arg, expectation in {'': 'error: argument --slice: value does not conform to format \'SLICE/NUM_SLICES\'',
+                                 '0': 'error: argument --slice: value does not conform to format \'SLICE/NUM_SLICES\'',
+                                 '0/1': 'error: argument --slice: SLICE is not a positive integer',
+                                 'a/1': 'error: argument --slice: SLICE is not an integer',
+                                 '1/0': 'error: argument --slice: NUM_SLICES is not a positive integer',
+                                 '1/a': 'error: argument --slice: NUM_SLICES is not an integer',
+                                 '2/1': 'error: argument --slice: SLICE exceeds NUM_SLICES',
+                                 '1/11': 'ERROR: number of slices (11) exceeds number of tests (10)',
+                                 }.items():
+            with self.assertRaises(subprocess.CalledProcessError) as cm:
+                self._run(self.mtest_command + ['--slice=' + arg])
+            self.assertIn(expectation, cm.exception.output)
+
     def test_rsp_support(self):
         env = get_fake_env()
         cc = detect_c_compiler(env, MachineChoice.HOST)
@@ -5143,3 +5177,16 @@ class AllPlatformTests(BasePlatformTests):
         testdir = os.path.join(self.unit_test_dir, '117 empty project')
         args = ['-Db_ndebug=if_release']
         self.init(testdir, extra_args=args)
+
+    def test_wipe_with_args(self):
+        testdir = os.path.join(self.common_test_dir, '1 trivial')
+        self.init(testdir, extra_args=['-Dc_args=-DSOMETHING'])
+        self.init(testdir, extra_args=['--wipe'])
+
+    def test_interactive_tap(self):
+        testdir = os.path.join(self.unit_test_dir, '124 interactive tap')
+        self.init(testdir, extra_args=['--wrap-mode=forcefallback'])
+        output = self._run(self.mtest_command + ['--interactive'])
+        self.assertRegex(output, r'Ok:\s*0')
+        self.assertRegex(output, r'Fail:\s*0')
+        self.assertRegex(output, r'Ignored:\s*1')
