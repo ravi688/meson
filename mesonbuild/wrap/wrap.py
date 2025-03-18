@@ -821,6 +821,7 @@ class Resolver:
         return [str(file.absolute()) for file in directory_path.rglob('*') if file.is_file()]
 
     def apply_patch_file(self, patch_file_abs_path : str) -> None:
+        mlog.log('Applying patch file:', mlog.bold(os.path.relpath(patch_file_abs_path, self.subdir_root)), 'to', mlog.bold(self.wrap.name))
         relpath = os.path.relpath(patch_file_abs_path, self.dirname)
         if PATCH:
             # Always pass a POSIX path to patch, because on Windows it's MSYS
