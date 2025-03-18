@@ -102,3 +102,7 @@ More information about the Meson build system can be found at the
 [project's home page](https://mesonbuild.com).
 
 Meson is a registered trademark of ***Jussi Pakkanen***.
+
+
+### Modifications added since Fork
+- [x] `[wrap-path]` wrap support, you can now use a meson project located anywhere in your disk as a subproject
