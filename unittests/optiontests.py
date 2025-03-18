@@ -6,6 +6,10 @@ from mesonbuild.options import *
 import unittest
 
 
+def num_options(store: OptionStore) -> int:
+    return len(store.options)
+
+
 class OptionTests(unittest.TestCase):
 
     def test_basic(self):
@@ -32,21 +36,23 @@ class OptionTests(unittest.TestCase):
         self.assertEqual(optstore.get_value_for(k), new_value)
 
     def test_parsing(self):
-        s1 = OptionKey.from_string('sub:optname')
-        s1_expected = OptionKey('optname', 'sub', MachineChoice.HOST)
-        self.assertEqual(s1, s1_expected)
-        self.assertEqual(str(s1), 'sub:optname')
+        with self.subTest('subproject'):
+            s1 = OptionKey.from_string('sub:optname')
+            s1_expected = OptionKey('optname', 'sub', MachineChoice.HOST)
+            self.assertEqual(s1, s1_expected)
+            self.assertEqual(str(s1), 'sub:optname')
 
-        s2 = OptionKey.from_string('optname')
-        s2_expected = OptionKey('optname', None, MachineChoice.HOST)
-        self.assertEqual(s2, s2_expected)
+        with self.subTest('plain name'):
+            s2 = OptionKey.from_string('optname')
+            s2_expected = OptionKey('optname', None, MachineChoice.HOST)
+            self.assertEqual(s2, s2_expected)
+            self.assertEqual(str(s2), 'optname')
 
-        self.assertEqual(str(s2), 'optname')
-
-        s3 = OptionKey.from_string(':optname')
-        s3_expected = OptionKey('optname', '', MachineChoice.HOST)
-        self.assertEqual(s3, s3_expected)
-        self.assertEqual(str(s3), ':optname')
+        with self.subTest('root project'):
+            s3 = OptionKey.from_string(':optname')
+            s3_expected = OptionKey('optname', '', MachineChoice.HOST)
+            self.assertEqual(s3, s3_expected)
+            self.assertEqual(str(s3), ':optname')
 
     def test_subproject_for_system(self):
         optstore = OptionStore(False)
@@ -64,11 +70,11 @@ class OptionTests(unittest.TestCase):
         vo = UserStringOption(name, 'An option set twice', original_value)
         optstore.add_system_option(name, vo)
         self.assertEqual(optstore.get_value_for(name), original_value)
-        self.assertEqual(optstore.num_options(), 1)
+        self.assertEqual(num_options(optstore), 1)
         vo2 = UserStringOption(name, 'An option set twice', reset_value)
         optstore.add_system_option(name, vo2)
         self.assertEqual(optstore.get_value_for(name), original_value)
-        self.assertEqual(optstore.num_options(), 1)
+        self.assertEqual(num_options(optstore), 1)
 
     def test_project_nonyielding(self):
         optstore = OptionStore(False)
@@ -78,12 +84,12 @@ class OptionTests(unittest.TestCase):
         vo = UserStringOption(name, 'A top level option', top_value, False)
         optstore.add_project_option(OptionKey(name, ''), vo)
         self.assertEqual(optstore.get_value_for(name, ''), top_value, False)
-        self.assertEqual(optstore.num_options(), 1)
+        self.assertEqual(num_options(optstore), 1)
         vo2 = UserStringOption(name, 'A subproject option', sub_value)
         optstore.add_project_option(OptionKey(name, 'sub'), vo2)
         self.assertEqual(optstore.get_value_for(name, ''), top_value)
         self.assertEqual(optstore.get_value_for(name, 'sub'), sub_value)
-        self.assertEqual(optstore.num_options(), 2)
+        self.assertEqual(num_options(optstore), 2)
 
     def test_project_yielding(self):
         optstore = OptionStore(False)
@@ -93,12 +99,28 @@ class OptionTests(unittest.TestCase):
         vo = UserStringOption(name, 'A top level option', top_value)
         optstore.add_project_option(OptionKey(name, ''), vo)
         self.assertEqual(optstore.get_value_for(name, ''), top_value)
-        self.assertEqual(optstore.num_options(), 1)
+        self.assertEqual(num_options(optstore), 1)
         vo2 = UserStringOption(name, 'A subproject option', sub_value, True)
         optstore.add_project_option(OptionKey(name, 'sub'), vo2)
         self.assertEqual(optstore.get_value_for(name, ''), top_value)
         self.assertEqual(optstore.get_value_for(name, 'sub'), top_value)
-        self.assertEqual(optstore.num_options(), 2)
+        self.assertEqual(num_options(optstore), 2)
+
+    def test_project_yielding_not_defined_in_top_project(self):
+        optstore = OptionStore(False)
+        top_name = 'a_name'
+        top_value = 'top'
+        sub_name = 'different_name'
+        sub_value = 'sub'
+        vo = UserStringOption(top_name, 'A top level option', top_value)
+        optstore.add_project_option(OptionKey(top_name, ''), vo)
+        self.assertEqual(optstore.get_value_for(top_name, ''), top_value)
+        self.assertEqual(num_options(optstore), 1)
+        vo2 = UserStringOption(sub_name, 'A subproject option', sub_value, True)
+        optstore.add_project_option(OptionKey(sub_name, 'sub'), vo2)
+        self.assertEqual(optstore.get_value_for(top_name, ''), top_value)
+        self.assertEqual(optstore.get_value_for(sub_name, 'sub'), sub_value)
+        self.assertEqual(num_options(optstore), 2)
 
     def test_augments(self):
         optstore = OptionStore(False)
@@ -160,25 +182,7 @@ class OptionTests(unittest.TestCase):
         self.assertEqual(optstore.get_value_for(name), top_value)
         self.assertEqual(optstore.get_value_for(name, sub_name), set_value)
 
-    def test_subproject_call_options(self):
+    def test_b_default(self):
         optstore = OptionStore(False)
-        name = 'cpp_std'
-        default_value = 'c++11'
-        override_value = 'c++14'
-        unused_value = 'c++20'
-        subproject = 'sub'
-
-        co = UserComboOption(name,
-                             'C++ language standard to use',
-                             default_value,
-                             choices=['c++98', 'c++11', 'c++14', 'c++17', 'c++20', 'c++23'],
-                             )
-        optstore.add_system_option(name, co)
-        optstore.set_subproject_options(subproject, [f'cpp_std={override_value}'], [f'cpp_std={unused_value}'])
-        self.assertEqual(optstore.get_value_for(name), default_value)
-        self.assertEqual(optstore.get_value_for(name, subproject), override_value)
-
-        # Trying again should change nothing
-        optstore.set_subproject_options(subproject, [f'cpp_std={unused_value}'], [f'cpp_std={unused_value}'])
-        self.assertEqual(optstore.get_value_for(name), default_value)
-        self.assertEqual(optstore.get_value_for(name, subproject), override_value)
+        value = optstore.get_default_for_b_option(OptionKey('b_vscrt'))
+        self.assertEqual(value, 'from_buildtype')

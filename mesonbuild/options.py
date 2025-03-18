@@ -5,7 +5,6 @@
 from __future__ import annotations
 from collections import OrderedDict
 from itertools import chain
-from functools import total_ordering
 import argparse
 import dataclasses
 import itertools
@@ -34,7 +33,7 @@ from .mesonlib import (
 from . import mlog
 
 if T.TYPE_CHECKING:
-    from typing_extensions import Literal, TypeAlias, TypedDict
+    from typing_extensions import Literal, Final, TypeAlias, TypedDict
 
     DeprecatedType: TypeAlias = T.Union[bool, str, T.Dict[str, str], T.List[str]]
     AnyOptionType: TypeAlias = T.Union[
@@ -43,14 +42,14 @@ if T.TYPE_CHECKING:
         'UserStringOption', 'UserUmaskOption']
     ElementaryOptionValues: TypeAlias = T.Union[str, int, bool, T.List[str]]
 
+    _OptionKeyTuple: TypeAlias = T.Tuple[T.Optional[str], MachineChoice, str]
+
     class ArgparseKWs(TypedDict, total=False):
 
         action: str
         dest: str
         default: str
         choices: T.List
-
-    OptionValueType: TypeAlias = T.Union[str, int, bool, T.List[str]]
 
 DEFAULT_YIELDING = False
 
@@ -105,8 +104,9 @@ _BUILTIN_NAMES = {
 }
 
 _BAD_VALUE = 'Qwert Zuiopü'
+_optionkey_cache: T.Dict[_OptionKeyTuple, OptionKey] = {}
 
-@total_ordering
+
 class OptionKey:
 
     """Represents an option key in the various option dictionaries.
@@ -116,26 +116,42 @@ class OptionKey:
     internally easier to reason about and produce.
     """
 
-    __slots__ = ['name', 'subproject', 'machine', '_hash']
+    __slots__ = ('name', 'subproject', 'machine', '_hash')
 
     name: str
-    subproject: T.Optional[str] # None is global, empty string means top level project
+    subproject: T.Optional[str]  # None is global, empty string means top level project
     machine: MachineChoice
     _hash: int
 
-    def __init__(self,
-                 name: str,
-                 subproject: T.Optional[str] = None,
-                 machine: MachineChoice = MachineChoice.HOST):
+    def __new__(cls,
+                name: str = '',
+                subproject: T.Optional[str] = None,
+                machine: MachineChoice = MachineChoice.HOST) -> OptionKey:
+        """The use of the __new__ method allows to add a transparent cache
+        to the OptionKey object creation, without breaking its API.
+        """
+        if not name:
+            return super().__new__(cls)  # for unpickling, do not cache now
+
+        tuple_: _OptionKeyTuple = (subproject, machine, name)
+        try:
+            return _optionkey_cache[tuple_]
+        except KeyError:
+            instance = super().__new__(cls)
+            instance._init(name, subproject, machine)
+            _optionkey_cache[tuple_] = instance
+            return instance
+
+    def _init(self, name: str, subproject: T.Optional[str], machine: MachineChoice) -> None:
+        # We don't use the __init__ method, because it would be called after __new__
+        # while we need __new__ to initialise the object before populating the cache.
+
         if not isinstance(machine, MachineChoice):
             raise MesonException(f'Internal error, bad machine type: {machine}')
         if not isinstance(name, str):
             raise MesonBugException(f'Key name is not a string: {name}')
-        # the _type option to the constructor is kinda private. We want to be
-        # able to save the state and avoid the lookup function when
-        # pickling/unpickling, but we need to be able to calculate it when
-        # constructing a new OptionKey
         assert ':' not in name
+
         object.__setattr__(self, 'name', name)
         object.__setattr__(self, 'subproject', subproject)
         object.__setattr__(self, 'machine', machine)
@@ -152,25 +168,24 @@ class OptionKey:
         }
 
     def __setstate__(self, state: T.Dict[str, T.Any]) -> None:
-        """De-serialize the state of a pickle.
-
-        This is very clever. __init__ is not a constructor, it's an
-        initializer, therefore it's safe to call more than once. We create a
-        state in the custom __getstate__ method, which is valid to pass
-        splatted to the initializer.
-        """
-        # Mypy doesn't like this, because it's so clever.
-        self.__init__(**state)  # type: ignore
+        # Here, the object is created using __new__()
+        self._init(**state)
+        _optionkey_cache[self._to_tuple()] = self
 
     def __hash__(self) -> int:
         return self._hash
 
-    def _to_tuple(self) -> T.Tuple[str, MachineChoice, str]:
+    def _to_tuple(self) -> _OptionKeyTuple:
         return (self.subproject, self.machine, self.name)
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, OptionKey):
             return self._to_tuple() == other._to_tuple()
+        return NotImplemented
+
+    def __ne__(self, other: object) -> bool:
+        if isinstance(other, OptionKey):
+            return self._to_tuple() != other._to_tuple()
         return NotImplemented
 
     def __lt__(self, other: object) -> bool:
@@ -180,6 +195,33 @@ class OptionKey:
             elif other.subproject is None:
                 return False
             return self._to_tuple() < other._to_tuple()
+        return NotImplemented
+
+    def __le__(self, other: object) -> bool:
+        if isinstance(other, OptionKey):
+            if self.subproject is None and other.subproject is not None:
+                return True
+            elif self.subproject is not None and other.subproject is None:
+                return False
+            return self._to_tuple() <= other._to_tuple()
+        return NotImplemented
+
+    def __gt__(self, other: object) -> bool:
+        if isinstance(other, OptionKey):
+            if other.subproject is None:
+                return self.subproject is not None
+            elif self.subproject is None:
+                return False
+            return self._to_tuple() > other._to_tuple()
+        return NotImplemented
+
+    def __ge__(self, other: object) -> bool:
+        if isinstance(other, OptionKey):
+            if self.subproject is None and other.subproject is not None:
+                return False
+            elif self.subproject is not None and other.subproject is None:
+                return True
+            return self._to_tuple() >= other._to_tuple()
         return NotImplemented
 
     def __str__(self) -> str:
@@ -240,17 +282,15 @@ class OptionKey:
                          subproject if subproject != _BAD_VALUE else self.subproject, # None is a valid value so it can'the default value in method declaration.
                          machine if machine is not None else self.machine)
 
-    def as_root(self) -> 'OptionKey':
+    def as_root(self) -> OptionKey:
         """Convenience method for key.evolve(subproject='')."""
-        if self.subproject is None or self.subproject == '':
-            return self
         return self.evolve(subproject='')
 
-    def as_build(self) -> 'OptionKey':
+    def as_build(self) -> OptionKey:
         """Convenience method for key.evolve(machine=MachineChoice.BUILD)."""
         return self.evolve(machine=MachineChoice.BUILD)
 
-    def as_host(self) -> 'OptionKey':
+    def as_host(self) -> OptionKey:
         """Convenience method for key.evolve(machine=MachineChoice.HOST)."""
         return self.evolve(machine=MachineChoice.HOST)
 
@@ -261,12 +301,6 @@ class OptionKey:
         if self.has_module_prefix():
             return self.name.split('.', 1)[0]
         return None
-
-    def without_module_prefix(self) -> 'OptionKey':
-        if self.has_module_prefix():
-            newname = self.name.split('.', 1)[1]
-            return self.evolve(newname)
-        return self
 
     def is_for_build(self) -> bool:
         return self.machine is MachineChoice.BUILD
@@ -282,15 +316,17 @@ class UserOption(T.Generic[_T], HoldableObject):
     value_: dataclasses.InitVar[_T]
     yielding: bool = DEFAULT_YIELDING
     deprecated: DeprecatedType = False
-    readonly: bool = dataclasses.field(default=False, init=False)
+    readonly: bool = dataclasses.field(default=False)
 
     def __post_init__(self, value_: _T) -> None:
         self.value = self.validate_value(value_)
+        # Final isn't technically allowed in a __post_init__ method
+        self.default: Final[_T] = self.value  # type: ignore[misc]
 
     def listify(self, value: T.Any) -> T.List[T.Any]:
         return [value]
 
-    def printable_value(self) -> T.Union[str, int, bool, T.List[T.Union[str, int, bool]]]:
+    def printable_value(self) -> ElementaryOptionValues:
         assert isinstance(self.value, (str, int, bool, list))
         return self.value
 
@@ -593,158 +629,119 @@ class UserStdOption(UserComboOption):
                              f'Possible values for option "{self.name}" are {self.choices}')
 
 
-class BuiltinOption(T.Generic[_T]):
+def argparse_name_to_arg(name: str) -> str:
+    if name == 'warning_level':
+        return '--warnlevel'
+    return '--' + name.replace('_', '-')
 
-    """Class for a builtin option type.
 
-    There are some cases that are not fully supported yet.
-    """
+def argparse_prefixed_default(opt: AnyOptionType, name: OptionKey, prefix: str = '') -> ElementaryOptionValues:
+    if isinstance(opt, (UserComboOption, UserIntegerOption, UserUmaskOption)):
+        return T.cast('ElementaryOptionValues', opt.default)
+    try:
+        return BUILTIN_DIR_NOPREFIX_OPTIONS[name][prefix]
+    except KeyError:
+        return T.cast('ElementaryOptionValues', opt.default)
 
-    def __init__(self, opt_type: T.Type[UserOption[_T]], description: str, default: T.Any, yielding: bool = True, *,
-                 choices: T.Any = None, readonly: bool = False, **kwargs: object):
-        self.opt_type = opt_type
-        self.description = description
-        self.default = default
-        self.choices = choices
-        self.yielding = yielding
-        self.readonly = readonly
-        self.kwargs = kwargs
 
-    def init_option(self, name: 'OptionKey', value: T.Optional[T.Any], prefix: str) -> UserOption[_T]:
-        """Create an instance of opt_type and return it."""
-        if value is None:
-            value = self.prefixed_default(name, prefix)
-        keywords = {'yielding': self.yielding, 'value_': value}
-        keywords.update(self.kwargs)
-        if self.choices:
-            keywords['choices'] = self.choices
-        o = self.opt_type(name.name, self.description, **keywords)
-        o.readonly = self.readonly
-        return o
+def option_to_argparse(option: AnyOptionType, name: OptionKey, parser: argparse.ArgumentParser, help_suffix: str) -> None:
+    kwargs: ArgparseKWs = {}
 
-    def _argparse_action(self) -> T.Optional[str]:
-        # If the type is a boolean, the presence of the argument in --foo form
-        # is to enable it. Disabling happens by using -Dfoo=false, which is
-        # parsed under `args.projectoptions` and does not hit this codepath.
-        if isinstance(self.default, bool):
-            return 'store_true'
-        return None
+    if isinstance(option, (EnumeratedUserOption, UserArrayOption)):
+        c = option.choices
+    else:
+        c = None
+    b = 'store_true' if isinstance(option.default, bool) else None
+    h = option.description
+    if not b:
+        h = '{} (default: {}).'.format(h.rstrip('.'), argparse_prefixed_default(option, name))
+    else:
+        kwargs['action'] = b
+    if c and not b:
+        kwargs['choices'] = c
+    kwargs['default'] = argparse.SUPPRESS
+    kwargs['dest'] = str(name)
 
-    def _argparse_choices(self) -> T.Any:
-        if self.opt_type is UserBooleanOption:
-            return [True, False]
-        return self.choices
+    cmdline_name = argparse_name_to_arg(str(name))
+    parser.add_argument(cmdline_name, help=h + help_suffix, **kwargs)
 
-    @staticmethod
-    def argparse_name_to_arg(name: str) -> str:
-        if name == 'warning_level':
-            return '--warnlevel'
-        else:
-            return '--' + name.replace('_', '-')
-
-    def prefixed_default(self, name: 'OptionKey', prefix: str = '') -> T.Any:
-        if self.opt_type in {UserComboOption, UserIntegerOption, UserUmaskOption}:
-            return self.default
-        try:
-            return BUILTIN_DIR_NOPREFIX_OPTIONS[name][prefix]
-        except KeyError:
-            pass
-        return self.default
-
-    def add_to_argparse(self, name: OptionKey, parser: argparse.ArgumentParser, help_suffix: str) -> None:
-        kwargs: ArgparseKWs = {}
-
-        c = self._argparse_choices()
-        b = self._argparse_action()
-        h = self.description
-        if not b:
-            h = '{} (default: {}).'.format(h.rstrip('.'), self.prefixed_default(name))
-        else:
-            kwargs['action'] = b
-        if c and not b:
-            kwargs['choices'] = c
-        kwargs['default'] = argparse.SUPPRESS
-        kwargs['dest'] = str(name)
-
-        cmdline_name = self.argparse_name_to_arg(str(name))
-        parser.add_argument(cmdline_name, help=h + help_suffix, **kwargs)
 
 # Update `docs/markdown/Builtin-options.md` after changing the options below
 # Also update mesonlib._BUILTIN_NAMES. See the comment there for why this is required.
 # Please also update completion scripts in $MESONSRC/data/shell-completions/
-BUILTIN_DIR_OPTIONS: T.Dict['OptionKey', 'BuiltinOption'] = OrderedDict([
-    (OptionKey('prefix'),          BuiltinOption(UserStringOption, 'Installation prefix', default_prefix())),
-    (OptionKey('bindir'),          BuiltinOption(UserStringOption, 'Executable directory', 'bin')),
-    (OptionKey('datadir'),         BuiltinOption(UserStringOption, 'Data file directory', default_datadir())),
-    (OptionKey('includedir'),      BuiltinOption(UserStringOption, 'Header file directory', default_includedir())),
-    (OptionKey('infodir'),         BuiltinOption(UserStringOption, 'Info page directory', default_infodir())),
-    (OptionKey('libdir'),          BuiltinOption(UserStringOption, 'Library directory', default_libdir())),
-    (OptionKey('licensedir'),      BuiltinOption(UserStringOption, 'Licenses directory', '')),
-    (OptionKey('libexecdir'),      BuiltinOption(UserStringOption, 'Library executable directory', default_libexecdir())),
-    (OptionKey('localedir'),       BuiltinOption(UserStringOption, 'Locale data directory', default_localedir())),
-    (OptionKey('localstatedir'),   BuiltinOption(UserStringOption, 'Localstate data directory', 'var')),
-    (OptionKey('mandir'),          BuiltinOption(UserStringOption, 'Manual page directory', default_mandir())),
-    (OptionKey('sbindir'),         BuiltinOption(UserStringOption, 'System executable directory', default_sbindir())),
-    (OptionKey('sharedstatedir'),  BuiltinOption(UserStringOption, 'Architecture-independent data directory', 'com')),
-    (OptionKey('sysconfdir'),      BuiltinOption(UserStringOption, 'Sysconf data directory', default_sysconfdir())),
-])
+BUILTIN_DIR_OPTIONS: T.Mapping[OptionKey, AnyOptionType] = {
+    OptionKey(o.name): o for o in [
+        UserStringOption('prefix', 'Installation prefix', default_prefix()),
+        UserStringOption('bindir', 'Executable directory', 'bin'),
+        UserStringOption('datadir', 'Data file directory', default_datadir()),
+        UserStringOption('includedir', 'Header file directory', default_includedir()),
+        UserStringOption('infodir', 'Info page directory', default_infodir()),
+        UserStringOption('libdir', 'Library directory', default_libdir()),
+        UserStringOption('licensedir', 'Licenses directory', ''),
+        UserStringOption('libexecdir', 'Library executable directory', default_libexecdir()),
+        UserStringOption('localedir', 'Locale data directory', default_localedir()),
+        UserStringOption('localstatedir', 'Localstate data directory', 'var'),
+        UserStringOption('mandir', 'Manual page directory', default_mandir()),
+        UserStringOption('sbindir', 'System executable directory', default_sbindir()),
+        UserStringOption('sharedstatedir', 'Architecture-independent data directory', 'com'),
+        UserStringOption('sysconfdir', 'Sysconf data directory', default_sysconfdir()),
+    ]
+}
 
-BUILTIN_CORE_OPTIONS: T.Dict['OptionKey', 'BuiltinOption'] = OrderedDict([
-    (OptionKey('auto_features'),   BuiltinOption(UserFeatureOption, "Override value of all 'auto' features", 'auto')),
-    (OptionKey('backend'),         BuiltinOption(UserComboOption, 'Backend to use', 'ninja', choices=backendlist,
-                                                 readonly=True)),
-    (OptionKey('genvslite'),
-     BuiltinOption(
-         UserComboOption,
-         'Setup multiple buildtype-suffixed ninja-backend build directories, '
-         'and a [builddir]_vs containing a Visual Studio meta-backend with multiple configurations that calls into them',
-         'vs2022',
-         choices=genvslitelist)
-     ),
-    (OptionKey('buildtype'),       BuiltinOption(UserComboOption, 'Build type to use', 'debug',
-                                                 choices=buildtypelist)),
-    (OptionKey('debug'),           BuiltinOption(UserBooleanOption, 'Enable debug symbols and other information', True)),
-    (OptionKey('default_library'), BuiltinOption(UserComboOption, 'Default library type', 'shared', choices=['shared', 'static', 'both'],
-                                                 yielding=False)),
-    (OptionKey('default_both_libraries'), BuiltinOption(UserComboOption, 'Default library type for both_libraries', 'shared', choices=['shared', 'static', 'auto'])),
-    (OptionKey('errorlogs'),       BuiltinOption(UserBooleanOption, "Whether to print the logs from failing tests", True)),
-    (OptionKey('install_umask'),   BuiltinOption(UserUmaskOption, 'Default umask to apply on permissions of installed files', '022')),
-    (OptionKey('layout'),          BuiltinOption(UserComboOption, 'Build directory layout', 'mirror', choices=['mirror', 'flat'])),
-    (OptionKey('optimization'),    BuiltinOption(UserComboOption, 'Optimization level', '0', choices=['plain', '0', 'g', '1', '2', '3', 's'])),
-    (OptionKey('prefer_static'),   BuiltinOption(UserBooleanOption, 'Whether to try static linking before shared linking', False)),
-    (OptionKey('stdsplit'),        BuiltinOption(UserBooleanOption, 'Split stdout and stderr in test logs', True)),
-    (OptionKey('strip'),           BuiltinOption(UserBooleanOption, 'Strip targets on install', False)),
-    (OptionKey('unity'),           BuiltinOption(UserComboOption, 'Unity build', 'off', choices=['on', 'off', 'subprojects'])),
-    (OptionKey('unity_size'),      BuiltinOption(UserIntegerOption, 'Unity block size', 4, min_value=2)),
-    (OptionKey('warning_level'),   BuiltinOption(UserComboOption, 'Compiler warning level to use', '1', choices=['0', '1', '2', '3', 'everything'], yielding=False)),
-    (OptionKey('werror'),          BuiltinOption(UserBooleanOption, 'Treat warnings as errors', False, yielding=False)),
-    (OptionKey('wrap_mode'),       BuiltinOption(UserComboOption, 'Wrap mode', 'default', choices=['default', 'nofallback', 'nodownload', 'forcefallback', 'nopromote'])),
-    (OptionKey('force_fallback_for'), BuiltinOption(UserStringArrayOption, 'Force fallback for those subprojects', [])),
-    (OptionKey('vsenv'),           BuiltinOption(UserBooleanOption, 'Activate Visual Studio environment', False, readonly=True)),
+BUILTIN_CORE_OPTIONS: T.Mapping[OptionKey, AnyOptionType] = {
+    OptionKey(o.name): o for o in T.cast('T.List[AnyOptionType]', [
+        UserFeatureOption('auto_features', "Override value of all 'auto' features", 'auto'),
+        UserComboOption('backend', 'Backend to use', 'ninja', choices=backendlist, readonly=True),
+        UserComboOption(
+            'genvslite',
+            'Setup multiple buildtype-suffixed ninja-backend build directories, '
+            'and a [builddir]_vs containing a Visual Studio meta-backend with multiple configurations that calls into them',
+            'vs2022',
+            choices=genvslitelist
+        ),
+        UserComboOption('buildtype', 'Build type to use', 'debug', choices=buildtypelist),
+        UserBooleanOption('debug', 'Enable debug symbols and other information', True),
+        UserComboOption('default_library', 'Default library type', 'shared', choices=['shared', 'static', 'both'],
+                        yielding=False),
+        UserComboOption('default_both_libraries', 'Default library type for both_libraries', 'shared',
+                        choices=['shared', 'static', 'auto']),
+        UserBooleanOption('errorlogs', "Whether to print the logs from failing tests", True),
+        UserUmaskOption('install_umask', 'Default umask to apply on permissions of installed files', OctalInt(0o022)),
+        UserComboOption('layout', 'Build directory layout', 'mirror', choices=['mirror', 'flat']),
+        UserComboOption('optimization', 'Optimization level', '0', choices=['plain', '0', 'g', '1', '2', '3', 's']),
+        UserBooleanOption('prefer_static', 'Whether to try static linking before shared linking', False),
+        UserBooleanOption('stdsplit', 'Split stdout and stderr in test logs', True),
+        UserBooleanOption('strip', 'Strip targets on install', False),
+        UserComboOption('unity', 'Unity build', 'off', choices=['on', 'off', 'subprojects']),
+        UserIntegerOption('unity_size', 'Unity block size', 4, min_value=2),
+        UserComboOption('warning_level', 'Compiler warning level to use', '1', choices=['0', '1', '2', '3', 'everything'],
+                        yielding=False),
+        UserBooleanOption('werror', 'Treat warnings as errors', False, yielding=False),
+        UserComboOption('wrap_mode', 'Wrap mode', 'default', choices=['default', 'nofallback', 'nodownload', 'forcefallback', 'nopromote']),
+        UserStringArrayOption('force_fallback_for', 'Force fallback for those subprojects', []),
+        UserBooleanOption('vsenv', 'Activate Visual Studio environment', False, readonly=True),
 
-    # Pkgconfig module
-    (OptionKey('pkgconfig.relocatable'),
-     BuiltinOption(UserBooleanOption, 'Generate pkgconfig files as relocatable', False)),
+        # Pkgconfig module
+        UserBooleanOption('pkgconfig.relocatable', 'Generate pkgconfig files as relocatable', False),
 
-    # Python module
-    (OptionKey('python.bytecompile'),
-     BuiltinOption(UserIntegerOption, 'Whether to compile bytecode', 0, min_value=-1, max_value=2)),
-    (OptionKey('python.install_env'),
-     BuiltinOption(UserComboOption, 'Which python environment to install to', 'prefix', choices=['auto', 'prefix', 'system', 'venv'])),
-    (OptionKey('python.platlibdir'),
-     BuiltinOption(UserStringOption, 'Directory for site-specific, platform-specific files.', '')),
-    (OptionKey('python.purelibdir'),
-     BuiltinOption(UserStringOption, 'Directory for site-specific, non-platform-specific files.', '')),
-    (OptionKey('python.allow_limited_api'),
-     BuiltinOption(UserBooleanOption, 'Whether to allow use of the Python Limited API', True)),
-])
+        # Python module
+        UserIntegerOption('python.bytecompile', 'Whether to compile bytecode', 0, min_value=-1, max_value=2),
+        UserComboOption('python.install_env', 'Which python environment to install to', 'prefix',
+                        choices=['auto', 'prefix', 'system', 'venv']),
+        UserStringOption('python.platlibdir', 'Directory for site-specific, platform-specific files.', ''),
+        UserStringOption('python.purelibdir', 'Directory for site-specific, non-platform-specific files.', ''),
+        UserBooleanOption('python.allow_limited_api', 'Whether to allow use of the Python Limited API', True),
+    ])
+}
 
 BUILTIN_OPTIONS = OrderedDict(chain(BUILTIN_DIR_OPTIONS.items(), BUILTIN_CORE_OPTIONS.items()))
 
-BUILTIN_OPTIONS_PER_MACHINE: T.Dict['OptionKey', 'BuiltinOption'] = OrderedDict([
-    (OptionKey('pkg_config_path'), BuiltinOption(UserStringArrayOption, 'List of additional paths for pkg-config to search', [])),
-    (OptionKey('cmake_prefix_path'), BuiltinOption(UserStringArrayOption, 'List of additional prefixes for cmake to search', [])),
-])
+BUILTIN_OPTIONS_PER_MACHINE: T.Mapping[OptionKey, AnyOptionType] = {
+    OptionKey(o.name): o for o in [
+        UserStringArrayOption('pkg_config_path', 'List of additional paths for pkg-config to search', []),
+        UserStringArrayOption('cmake_prefix_path', 'List of additional prefixes for cmake to search', []),
+    ]
+}
 
 # Special prefix-dependent defaults for installation directories that reside in
 # a path outside of the prefix in FHS and common usage.
@@ -771,7 +768,6 @@ class OptionStore:
         self.module_options: T.Set[OptionKey] = set()
         from .compilers import all_languages
         self.all_languages = set(all_languages)
-        self.build_options = None
         self.project_options = set()
         self.augments: T.Dict[str, str] = {}
         self.pending_project_options: T.Dict[OptionKey, str] = {}
@@ -794,10 +790,10 @@ class OptionStore:
         # I did not do this yet, because it would make this MR even
         # more massive than it already is. Later then.
         if not self.is_cross and key.machine == MachineChoice.BUILD:
-            key = key.evolve(machine=MachineChoice.HOST)
+            key = key.as_host()
         return key
 
-    def get_value(self, key: T.Union[OptionKey, str]) -> 'OptionValueType':
+    def get_value(self, key: T.Union[OptionKey, str]) -> ElementaryOptionValues:
         return self.get_value_object(key).value
 
     def __len__(self) -> int:
@@ -809,8 +805,14 @@ class OptionStore:
         if self.is_project_option(key):
             assert key.subproject is not None
             if potential is not None and potential.yielding:
-                parent_key = key.evolve(subproject='')
-                parent_option = self.options[parent_key]
+                parent_key = key.as_root()
+                try:
+                    parent_option = self.options[parent_key]
+                except KeyError:
+                    # Subproject is set to yield, but top level
+                    # project does not have an option of the same
+                    # name. Return the subproject option.
+                    return potential
                 # If parent object has different type, do not yield.
                 # This should probably be an error.
                 if type(parent_option) is type(potential):
@@ -821,13 +823,13 @@ class OptionStore:
             return potential
         else:
             if potential is None:
-                parent_key = key.evolve(subproject=None)
+                parent_key = OptionKey(key.name, subproject=None, machine=key.machine)
                 if parent_key not in self.options:
                     raise KeyError(f'Tried to access nonexistant project parent option {parent_key}.')
                 return self.options[parent_key]
             return potential
 
-    def get_value_object_and_value_for(self, key: OptionKey) -> 'T.Tuple[AnyOptionType, OptionValueType]':
+    def get_value_object_and_value_for(self, key: OptionKey) -> T.Tuple[AnyOptionType, ElementaryOptionValues]:
         assert isinstance(key, OptionKey)
         vobject = self.get_value_object_for(key)
         computed_value = vobject.value
@@ -837,7 +839,7 @@ class OptionStore:
                 computed_value = vobject.validate_value(self.augments[keystr])
         return (vobject, computed_value)
 
-    def get_value_for(self, name: 'T.Union[OptionKey, str]', subproject: T.Optional[str] = None) -> 'OptionValueType':
+    def get_value_for(self, name: 'T.Union[OptionKey, str]', subproject: T.Optional[str] = None) -> ElementaryOptionValues:
         if isinstance(name, str):
             key = OptionKey(name, subproject)
         else:
@@ -845,11 +847,6 @@ class OptionStore:
             key = name
         vobject, resolved_value = self.get_value_object_and_value_for(key)
         return resolved_value
-
-    def num_options(self) -> int:
-        basic = len(self.options)
-        build = len(self.build_options) if self.build_options else 0
-        return basic + build
 
     def add_system_option(self, key: T.Union[OptionKey, str], valobj: AnyOptionType) -> None:
         key = self.ensure_and_validate_key(key)
@@ -944,53 +941,20 @@ class OptionStore:
         # .as_posix() keeps the posix-like file separators Meson uses.
         return value.as_posix()
 
-    def set_value(self, key: T.Union[OptionKey, str], new_value: 'T.Any', first_invocation: bool = False) -> bool:
-        key = self.ensure_and_validate_key(key)
+    def set_option(self, key: OptionKey, new_value: ElementaryOptionValues, first_invocation: bool = False) -> bool:
         if key.name == 'prefix':
+            assert isinstance(new_value, str), 'for mypy'
             new_value = self.sanitize_prefix(new_value)
         elif self.is_builtin_option(key):
             prefix = self.get_value_for('prefix')
-            assert isinstance(prefix, str)
+            assert isinstance(prefix, str), 'for mypy'
             new_value = self.sanitize_dir_option_value(prefix, key, new_value)
-        if key not in self.options:
-            raise MesonException(f'Unknown options: "{key.name}" not found.')
 
-        valobj = self.options[key]
-        old_value = valobj.value
-        changed = valobj.set_value(new_value)
+        try:
+            opt = self.get_value_object_for(key)
+        except KeyError:
+            raise MesonException(f'Unknown options: "{key!s}" not found.')
 
-        if valobj.readonly and changed and not first_invocation:
-            raise MesonException(f'Tried to modify read only option {str(key)!r}')
-
-        if key.name == 'prefix' and first_invocation and changed:
-            assert isinstance(old_value, str)
-            self.reset_prefixed_options(old_value, new_value)
-
-        if changed:
-            self.set_dependents(key, new_value)
-
-        return changed
-
-    def set_dependents(self, key: OptionKey, value: str) -> None:
-        if key.name != 'buildtype':
-            return
-        opt, debug = self.DEFAULT_DEPENDENTS[value]
-        dkey = key.evolve(name='debug')
-        optkey = key.evolve(name='optimization')
-        self.options[dkey].set_value(debug)
-        self.options[optkey].set_value(opt)
-
-    def set_option(self, key: OptionKey, new_value: str, first_invocation: bool = False) -> bool:
-        assert isinstance(key, OptionKey)
-        # FIXME, dupe of set_value
-        # Remove one of the two before merging to master.
-        if key.name == 'prefix':
-            new_value = self.sanitize_prefix(new_value)
-        elif self.is_builtin_option(key):
-            prefix = self.get_value_for('prefix')
-            assert isinstance(prefix, str)
-            new_value = self.sanitize_dir_option_value(prefix, key, new_value)
-        opt = self.get_value_object_for(key)
         if opt.deprecated is True:
             mlog.deprecation(f'Option {key.name!r} is deprecated')
         elif isinstance(opt.deprecated, list):
@@ -1017,15 +981,21 @@ class OptionStore:
         old_value = opt.value
         changed = opt.set_value(new_value)
 
-        if opt.readonly and changed:
-            raise MesonException(f'Tried modify read only option {str(key)!r}')
+        if opt.readonly and changed and not first_invocation:
+            raise MesonException(f'Tried to modify read only option {str(key)!r}')
 
         if key.name == 'prefix' and first_invocation and changed:
             assert isinstance(old_value, str), 'for mypy'
+            assert isinstance(new_value, str), 'for mypy'
             self.reset_prefixed_options(old_value, new_value)
 
-        if changed:
-            self.set_dependents(key, new_value)
+        if changed and key.name == 'buildtype':
+            assert isinstance(new_value, str), 'for mypy'
+            optimization, debug = self.DEFAULT_DEPENDENTS[new_value]
+            dkey = key.evolve(name='debug')
+            optkey = key.evolve(name='optimization')
+            self.options[dkey].set_value(debug)
+            self.options[optkey].set_value(optimization)
 
         return changed
 
@@ -1035,19 +1005,9 @@ class OptionStore:
         else:
             o = OptionKey.from_string(keystr)
         if o in self.options:
-            return self.set_value(o, new_value)
-        o = o.evolve(subproject='')
-        return self.set_value(o, new_value)
-
-    def set_subproject_options(self, subproject: str,
-                               spcall_default_options: str,
-                               project_default_options: str) -> None:
-        for o in itertools.chain(spcall_default_options, project_default_options):
-            keystr, valstr = o.split('=', 1)
-            assert ':' not in keystr
-            keystr = f'{subproject}:{keystr}'
-            if keystr not in self.augments:
-                self.augments[keystr] = valstr
+            return self.set_option(o, new_value)
+        o = o.as_root()
+        return self.set_option(o, new_value)
 
     def set_from_configure_command(self, D_args: T.List[str], U_args: T.List[str]) -> bool:
         dirty = False
@@ -1096,10 +1056,13 @@ class OptionStore:
         key = self.ensure_and_validate_key(key)
         return self.options[key]
 
-    def get_option_from_meson_file(self, key: OptionKey) -> 'T.Tuple[AnyOptionType, OptionValueType]':
-        assert isinstance(key, OptionKey)
-        (value_object, value) = self.get_value_object_and_value_for(key)
-        return (value_object, value)
+    def get_default_for_b_option(self, key: OptionKey) -> ElementaryOptionValues:
+        assert self.is_base_option(key)
+        from .compilers.compilers import BASE_OPTIONS
+        try:
+            return T.cast('ElementaryOptionValues', BASE_OPTIONS[key.evolve(subproject=None)].default)
+        except KeyError:
+            raise MesonBugException(f'Requested base option {key} which does not exist.')
 
     def remove(self, key: OptionKey) -> None:
         del self.options[key]
@@ -1257,7 +1220,9 @@ class OptionStore:
             if prefix in prefix_mapping:
                 new_value = prefix_mapping[prefix]
             else:
-                new_value = BUILTIN_OPTIONS[optkey].default
+                _v = BUILTIN_OPTIONS[optkey].default
+                assert isinstance(_v, str), 'for mypy'
+                new_value = _v
             valobj.set_value(new_value)
         self.options[OptionKey('prefix')].set_value(prefix)
 
@@ -1287,9 +1252,9 @@ class OptionStore:
                 augstr = str(key)
                 self.augments[augstr] = valstr
             elif key in self.options:
-                self.set_value(key, valstr, first_invocation)
+                self.set_option(key, valstr, first_invocation)
             else:
-                proj_key = key.evolve(subproject='')
+                proj_key = key.as_root()
                 if proj_key in self.options:
                     self.options[proj_key].set_value(valstr)
                 else:
@@ -1305,7 +1270,7 @@ class OptionStore:
             # A) a system option in which case the subproject is None
             # B) a project option, in which case the subproject is '' (this method is only called from top level)
             #
-            # The key parsing fucntion can not handle the difference between the two
+            # The key parsing function can not handle the difference between the two
             # and defaults to A.
             assert isinstance(keystr, str)
             key = OptionKey.from_string(keystr)
@@ -1322,7 +1287,7 @@ class OptionStore:
                 # Argubly this should be a hard error, the default
                 # value of project option should be set in the option
                 # file, not in the project call.
-                proj_key = key.evolve(subproject='')
+                proj_key = key.as_root()
                 if self.is_project_option(proj_key):
                     self.set_option(proj_key, valstr)
                 else:
@@ -1338,9 +1303,9 @@ class OptionStore:
             if not self.is_cross and key.is_for_build():
                 continue
             if key in self.options:
-                self.set_value(key, valstr, True)
+                self.set_option(key, valstr, True)
             elif key.subproject is None:
-                projectkey = key.evolve(subproject='')
+                projectkey = key.as_root()
                 if projectkey in self.options:
                     self.options[projectkey].set_value(valstr)
                 else:
@@ -1350,8 +1315,7 @@ class OptionStore:
                     #
                     # Some base options (sanitizers etc) might get added later.
                     # Permitting them all is not strictly correct.
-                    assert isinstance(keystr, str)
-                    if ':' not in keystr and not self.is_compiler_option(key) and not self.is_base_option(key):
+                    if not self.is_compiler_option(key) and not self.is_base_option(key):
                         raise MesonException(f'Unknown options: "{keystr}"')
                     self.pending_project_options[key] = valstr
             else:
@@ -1380,7 +1344,7 @@ class OptionStore:
             # If the key points to a project option, set the value from that.
             # Otherwise set an augment.
             if key in self.project_options:
-                self.set_value(key, valstr, is_first_invocation)
+                self.set_option(key, valstr, is_first_invocation)
             else:
                 self.pending_project_options.pop(key, None)
                 aug_str = f'{subproject}:{keystr}'
@@ -1394,6 +1358,6 @@ class OptionStore:
                 continue
             self.pending_project_options.pop(key, None)
             if key in self.options:
-                self.set_value(key, valstr, is_first_invocation)
+                self.set_option(key, valstr, is_first_invocation)
             else:
                 self.augments[str(key)] = valstr

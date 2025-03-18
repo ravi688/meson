@@ -124,6 +124,7 @@ __all__ = [
     'is_netbsd',
     'is_openbsd',
     'is_osx',
+    'is_parent_path',
     'is_qnx',
     'is_sunos',
     'is_windows',
@@ -1113,6 +1114,26 @@ def determine_worker_count(varnames: T.Optional[T.List[str]] = None) -> int:
             num_workers = 1
     return num_workers
 
+def is_parent_path(parent: str, trial: str) -> bool:
+    '''Checks if @trial is a file under the directory @parent. Both @trial and @parent should be
+       adequately normalized, though empty and '.' segments in @parent and @trial are accepted
+       and discarded, matching the behavior of os.path.commonpath.  Either both or none should
+       be absolute.'''
+    assert os.path.isabs(parent) == os.path.isabs(trial)
+    if is_windows():
+        parent = parent.replace('\\', '/')
+        trial = trial.replace('\\', '/')
+
+    split_parent = parent.split('/')
+    split_trial = trial.split('/')
+
+    split_parent = [c for c in split_parent if c and c != '.']
+    split_trial = [c for c in split_trial if c and c != '.']
+
+    components = len(split_parent)
+    return len(split_trial) >= components and split_trial[:components] == split_parent
+
+
 def has_path_sep(name: str, sep: str = '/\\') -> bool:
     'Checks if any of the specified @sep path separators are in @name'
     for each in sep:
@@ -1902,7 +1923,7 @@ def _make_tree_writable(topdir: T.Union[str, Path]) -> None:
         os.chmod(d, os.stat(d).st_mode | stat.S_IWRITE | stat.S_IREAD)
         for fname in files:
             fpath = os.path.join(d, fname)
-            if os.path.isfile(fpath):
+            if not os.path.islink(fpath) and os.path.isfile(fpath):
                 os.chmod(fpath, os.stat(fpath).st_mode | stat.S_IWRITE | stat.S_IREAD)
 
 
@@ -2379,10 +2400,17 @@ class lazy_property(T.Generic[_T]):
     Due to Python's MRO that means that the calculated value will be found
     before this property, speeding up subsequent lookups.
     """
-    def __init__(self, func: T.Callable[[T.Any], _T]):
+    def __init__(self, func: T.Callable[[T.Any], _T]) -> None:
+        self.__name: T.Optional[str] = None
         self.__func = func
+
+    def __set_name__(self, owner: T.Any, name: str) -> None:
+        if self.__name is None:
+            self.__name = name
+        else:
+            assert name == self.__name
 
     def __get__(self, instance: object, cls: T.Type) -> _T:
         value = self.__func(instance)
-        setattr(instance, self.__func.__name__, value)
+        setattr(instance, self.__name, value)
         return value

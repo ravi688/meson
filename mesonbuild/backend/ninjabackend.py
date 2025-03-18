@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import defaultdict, OrderedDict
 from dataclasses import dataclass
 from enum import Enum, unique
 from functools import lru_cache
@@ -31,7 +31,7 @@ from ..mesonlib import (
     File, LibType, MachineChoice, MesonBugException, MesonException, OrderedSet, PerMachine,
     ProgressBar, quote_arg
 )
-from ..mesonlib import get_compiler_for_source, has_path_sep
+from ..mesonlib import get_compiler_for_source, has_path_sep, is_parent_path
 from ..options import OptionKey
 from .backends import CleanTrees
 from ..build import GeneratedList, InvalidArguments
@@ -503,6 +503,7 @@ class NinjaBackend(backends.Backend):
         self.ninja_filename = 'build.ninja'
         self.fortran_deps: T.Dict[str, T.Dict[str, File]] = {}
         self.all_outputs: T.Set[str] = set()
+        self.all_pch: T.Dict[str, T.Set[str]] = defaultdict(set)
         self.all_structured_sources: T.Set[str] = set()
         self.introspection_data = {}
         self.created_llvm_ir_rule = PerMachine(False, False)
@@ -613,7 +614,7 @@ class NinjaBackend(backends.Backend):
             # so no harm in catching and reporting something unexpected.
             raise MesonBugException('We do not expect the ninja backend to be given a valid \'vslite_ctx\'')
         ninja = environment.detect_ninja_command_and_version(log=True)
-        if self.environment.coredata.get_option(OptionKey('vsenv')):
+        if self.environment.coredata.optstore.get_value_for(OptionKey('vsenv')):
             builddir = Path(self.environment.get_build_dir())
             try:
                 # For prettier printing, reduce to a relative path. If
@@ -1339,9 +1340,9 @@ class NinjaBackend(backends.Backend):
     def generate_tests(self) -> None:
         self.serialize_tests()
         cmd = self.environment.get_build_command(True) + ['test', '--no-rebuild']
-        if not self.environment.coredata.get_option(OptionKey('stdsplit')):
+        if not self.environment.coredata.optstore.get_value_for(OptionKey('stdsplit')):
             cmd += ['--no-stdsplit']
-        if self.environment.coredata.get_option(OptionKey('errorlogs')):
+        if self.environment.coredata.optstore.get_value_for(OptionKey('errorlogs')):
             cmd += ['--print-errorlogs']
         elem = self.create_phony_target('test', 'CUSTOM_COMMAND', ['all', 'meson-test-prereq', 'PHONY'])
         elem.add_item('COMMAND', cmd)
@@ -1712,7 +1713,7 @@ class NinjaBackend(backends.Backend):
                 # Check if the vala file is in a subdir of --basedir
                 abs_srcbasedir = os.path.join(self.environment.get_source_dir(), target.get_subdir())
                 abs_vala_file = os.path.join(self.environment.get_build_dir(), vala_file)
-                if PurePath(os.path.commonpath((abs_srcbasedir, abs_vala_file))) == PurePath(abs_srcbasedir):
+                if is_parent_path(abs_srcbasedir, abs_vala_file):
                     vala_c_subdir = PurePath(abs_vala_file).parent.relative_to(abs_srcbasedir)
                     vala_c_file = os.path.join(str(vala_c_subdir), vala_c_file)
             else:
@@ -2218,7 +2219,6 @@ class NinjaBackend(backends.Backend):
                 raise InvalidArguments(f'Swift target {target.get_basename()} contains a non-swift source file.')
         os.makedirs(self.get_target_private_dir_abs(target), exist_ok=True)
         compile_args = self.generate_basic_compiler_args(target, swiftc)
-        compile_args += swiftc.get_compile_only_args()
         compile_args += swiftc.get_module_args(module_name)
         for i in reversed(target.get_include_dirs()):
             basedir = i.get_curdir()
@@ -2266,12 +2266,16 @@ class NinjaBackend(backends.Backend):
         elem = NinjaBuildElement(self.all_outputs, rel_objects, rulename, abssrc)
         elem.add_dep(in_module_files + rel_generated)
         elem.add_dep(abs_headers)
-        elem.add_item('ARGS', compile_args + header_imports + abs_generated + module_includes)
+        elem.add_item('ARGS', swiftc.get_compile_only_args() + compile_args + header_imports + abs_generated + module_includes)
         elem.add_item('RUNDIR', rundir)
         self.add_build(elem)
+
+        # -g makes swiftc create a .o file with potentially the same name as one of the compile target generated ones.
+        mod_gen_args = [el for el in compile_args if el != '-g']
+
         elem = NinjaBuildElement(self.all_outputs, out_module_name, rulename, abssrc)
         elem.add_dep(in_module_files + rel_generated)
-        elem.add_item('ARGS', compile_args + abs_generated + module_includes + swiftc.get_mod_gen_args())
+        elem.add_item('ARGS', swiftc.get_mod_gen_args() + mod_gen_args + abs_generated + module_includes)
         elem.add_item('RUNDIR', rundir)
         self.add_build(elem)
         if isinstance(target, build.StaticLibrary):
@@ -3268,6 +3272,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             elem.add_item('ARGS', commands)
             elem.add_item('DEPFILE', dep)
             self.add_build(elem)
+            self.all_pch[compiler.id].update(objs + [dst])
         return pch_objects
 
     def get_target_shsym_filename(self, target):
@@ -3724,7 +3729,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         elem.add_item('pool', 'console')
         self.add_build(elem)
 
-    def generate_clangtool(self, name: str, extra_arg: T.Optional[str] = None) -> None:
+    def generate_clangtool(self, name: str, extra_arg: T.Optional[str] = None, need_pch: bool = False) -> None:
         target_name = 'clang-' + name
         extra_args = []
         if extra_arg:
@@ -3738,12 +3743,17 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return
         if target_name in self.all_outputs:
             return
+        if need_pch and not set(self.all_pch.keys()) <= {'clang'}:
+            return
+
         cmd = self.environment.get_build_command() + \
             ['--internal', 'clang' + name, self.environment.source_dir, self.environment.build_dir] + \
             extra_args
         elem = self.create_phony_target(target_name, 'CUSTOM_COMMAND', 'PHONY')
         elem.add_item('COMMAND', cmd)
         elem.add_item('pool', 'console')
+        if need_pch:
+            elem.add_dep(list(self.all_pch['clang']))
         self.add_build(elem)
 
     def generate_clangformat(self) -> None:
@@ -3755,10 +3765,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
     def generate_clangtidy(self) -> None:
         if not environment.detect_clangtidy():
             return
-        self.generate_clangtool('tidy')
+        self.generate_clangtool('tidy', need_pch=True)
         if not environment.detect_clangapply():
             return
-        self.generate_clangtool('tidy', 'fix')
+        self.generate_clangtool('tidy', 'fix', need_pch=True)
 
     def generate_tags(self, tool: str, target_name: str) -> None:
         import shutil

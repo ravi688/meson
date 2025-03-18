@@ -2,8 +2,8 @@
 # Copyright 2012-2017 The Meson development team
 
 from __future__ import annotations
-from collections import defaultdict, OrderedDict
-from dataclasses import dataclass, field, InitVar
+from collections import defaultdict, deque, OrderedDict
+from dataclasses import dataclass, field
 from functools import lru_cache
 import abc
 import copy
@@ -24,8 +24,8 @@ from .mesonlib import (
     File, MesonException, MachineChoice, PerMachine, OrderedSet, listify,
     extract_as_list, typeslistify, stringlistify, classify_unity_sources,
     get_filenames_templates_dict, substitute_values, has_path_sep,
-    PerMachineDefaultable,
-    MesonBugException, EnvironmentVariables, pickle_load,
+    is_parent_path, PerMachineDefaultable,
+    MesonBugException, EnvironmentVariables, pickle_load, lazy_property,
 )
 from .options import OptionKey
 
@@ -521,7 +521,6 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
     install: bool = False
     build_always_stale: bool = False
     extra_files: T.List[File] = field(default_factory=list)
-    override_options: InitVar[T.Optional[T.Dict[OptionKey, str]]] = None
 
     @abc.abstractproperty
     def typename(self) -> str:
@@ -531,7 +530,7 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
     def type_suffix(self) -> str:
         pass
 
-    def __post_init__(self, overrides: T.Optional[T.Dict[OptionKey, str]]) -> None:
+    def __post_init__(self) -> None:
         # XXX: this should happen in the interpreter
         if has_path_sep(self.name):
             # Fix failing test 53 when this becomes an error.
@@ -628,12 +627,16 @@ class Target(HoldableObject, metaclass=abc.ABCMeta):
             return subdir_part + '@@' + my_id
         return my_id
 
-    def get_id(self) -> str:
+    @lazy_property
+    def id(self) -> str:
         name = self.name
         if getattr(self, 'name_suffix_set', False):
             name += '.' + self.suffix
         return self.construct_id_from_path(
             self.subdir, name, self.type_suffix())
+
+    def get_id(self) -> str:
+        return self.id
 
     def process_kwargs_base(self, kwargs: T.Dict[str, T.Any]) -> None:
         if 'build_by_default' in kwargs:
@@ -980,8 +983,14 @@ class BuildTarget(Target):
         if 'vala' in self.compilers and 'c' not in self.compilers:
             self.compilers['c'] = self.all_compilers['c']
         if 'cython' in self.compilers:
-            key = OptionKey('cython_language', machine=self.for_machine)
-            value = self.environment.coredata.optstore.get_value_for(key)
+            # Not great, but we can't ask for the override value from "the system"
+            # because this object is currently being constructed so it is not
+            # yet placed in the data store. Grab it directly from override strings
+            # instead.
+            value = self.get_override('cython_language')
+            if value is None:
+                key = OptionKey('cython_language', machine=self.for_machine)
+                value = self.environment.coredata.optstore.get_value_for(key)
             try:
                 self.compilers[value] = self.all_compilers[value]
             except KeyError:
@@ -1049,15 +1058,29 @@ class BuildTarget(Target):
         return ExtractedObjects(self, self.sources, self.generated, self.objects,
                                 recursive, pch=True)
 
-    def get_all_link_deps(self) -> ImmutableListProtocol[BuildTargetTypes]:
-        return self.get_transitive_link_deps()
-
     @lru_cache(maxsize=None)
-    def get_transitive_link_deps(self) -> ImmutableListProtocol[BuildTargetTypes]:
-        result: T.List[Target] = []
-        for i in self.link_targets:
-            result += i.get_all_link_deps()
-        return result
+    def get_all_link_deps(self) -> ImmutableListProtocol[BuildTargetTypes]:
+        """ Get all shared libraries dependencies
+        This returns all shared libraries in the entire dependency tree. Those
+        are libraries needed at runtime which is different from the set needed
+        at link time, see get_dependencies() for that.
+        """
+        result: OrderedSet[BuildTargetTypes] = OrderedSet()
+        stack: T.Deque[BuildTargetTypes] = deque()
+        stack.appendleft(self)
+        while stack:
+            t = stack.pop()
+            if t in result:
+                continue
+            if isinstance(t, CustomTargetIndex):
+                stack.appendleft(t.target)
+                continue
+            if isinstance(t, SharedLibrary):
+                result.add(t)
+            if isinstance(t, BuildTarget):
+                stack.extendleft(t.link_targets)
+                stack.extendleft(t.link_whole_targets)
+        return list(result)
 
     def get_link_deps_mapping(self, prefix: str) -> T.Mapping[str, str]:
         return self.get_transitive_link_deps_mapping(prefix)
@@ -1703,7 +1726,7 @@ class BuildTarget(Target):
         self.process_link_depends(path)
 
     def extract_targets_as_list(self, kwargs: T.Dict[str, T.Union[LibTypes, T.Sequence[LibTypes]]], key: T.Literal['link_with', 'link_whole']) -> T.List[LibTypes]:
-        bl_type = self.environment.coredata.get_option(OptionKey('default_both_libraries'))
+        bl_type = self.environment.coredata.optstore.get_value_for(OptionKey('default_both_libraries'))
         if bl_type == 'auto':
             if isinstance(self, StaticLibrary):
                 bl_type = 'static'
@@ -1801,14 +1824,6 @@ class Generator(HoldableObject):
         basename = os.path.splitext(plainname)[0]
         return [x.replace('@BASENAME@', basename).replace('@PLAINNAME@', plainname) for x in self.arglist]
 
-    @staticmethod
-    def is_parent_path(parent: str, trial: str) -> bool:
-        try:
-            common = os.path.commonpath((parent, trial))
-        except ValueError: # Windows on different drives
-            return False
-        return pathlib.PurePath(common) == pathlib.PurePath(parent)
-
     def process_files(self, files: T.Iterable[T.Union[str, File, 'CustomTarget', 'CustomTargetIndex', 'GeneratedList']],
                       state: T.Union['Interpreter', 'ModuleState'],
                       preserve_path_from: T.Optional[str] = None,
@@ -1838,7 +1853,7 @@ class Generator(HoldableObject):
             for f in fs:
                 if preserve_path_from:
                     abs_f = f.absolute_path(state.environment.source_dir, state.environment.build_dir)
-                    if not self.is_parent_path(preserve_path_from, abs_f):
+                    if not is_parent_path(preserve_path_from, abs_f):
                         raise InvalidArguments('generator.process: When using preserve_path_from, all input files must be in a subdirectory of the given dir.')
                 f = FileMaybeInTargetPrivateDir(f)
                 output.add_file(f, state)
@@ -2011,7 +2026,7 @@ class Executable(BuildTarget):
             machine.is_windows()
             and ('cs' in self.compilers or self.uses_rust() or self.get_using_msvc())
             # .pdb file is created only when debug symbols are enabled
-            and self.environment.coredata.get_option(OptionKey("debug"))
+            and self.environment.coredata.optstore.get_value_for(OptionKey("debug"))
         )
         if create_debug_file:
             # If the target is has a standard exe extension (i.e. 'foo.exe'),
@@ -2293,14 +2308,14 @@ class SharedLibrary(BuildTarget):
                 # Import library is called foo.dll.lib
                 import_filename_tpl = '{0.prefix}{0.name}.dll.lib'
                 # .pdb file is only created when debug symbols are enabled
-                create_debug_file = self.environment.coredata.get_option(OptionKey("debug"))
+                create_debug_file = self.environment.coredata.optstore.get_value_for(OptionKey("debug"))
             elif self.get_using_msvc():
                 # Shared library is of the form foo.dll
                 prefix = ''
                 # Import library is called foo.lib
                 import_filename_tpl = '{0.prefix}{0.name}.lib'
                 # .pdb file is only created when debug symbols are enabled
-                create_debug_file = self.environment.coredata.get_option(OptionKey("debug"))
+                create_debug_file = self.environment.coredata.optstore.get_value_for(OptionKey("debug"))
             # Assume GCC-compatible naming
             else:
                 # Shared library is of the form libfoo.dll
@@ -2414,9 +2429,6 @@ class SharedLibrary(BuildTarget):
         Returns None if the build won't create any debuginfo file
         """
         return self.debug_filename
-
-    def get_all_link_deps(self):
-        return [self] + self.get_transitive_link_deps()
 
     def get_aliases(self) -> T.List[T.Tuple[str, str, str]]:
         """
