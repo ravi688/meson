@@ -572,12 +572,24 @@ class Runner:
         if not subproject_source_dir.is_dir():
             return True
 
+
+        # Remove subproject's source directory
         try:
             if options.confirm:
                 windows_proof_rmtree(str(subproject_source_dir))
             self.log(f'Deleting {subproject_source_dir}')
         except OSError as e:
             mlog.error(f'Unable to remove: {subproject_source_dir}: {e}')
+            return False
+
+        # Remove subproject's patch extract directory
+        subproject_patch_dir = f'{str(subproject_source_dir)}.patch.dir'
+        try:
+            if options.confirm:
+                windows_proof_rmtree(subproject_patch_dir)
+            self.log(f'Deleting {subproject_patch_dir}')
+        except OSError as e:
+            mlog.error(f'Unable to remove: {subproject_patch_dir}: {e}')
             return False
 
         return True
