@@ -808,18 +808,61 @@ class Resolver:
 
             return path.as_posix()
 
+    def ensure_patch_extract_dir(self, packagename: str) -> str:
+        patch_extract_dir = os.path.join(self.subdir_root, f'{packagename}.patch.dir')
+        if not os.path.exists(patch_extract_dir):
+            os.mkdir(patch_extract_dir)
+        elif not len(os.listdir(patch_extract_dir)) == 0:
+            raise WrapException(f'Patch extract dir: {patch_extract_dir} either shouldn\'t exist or it should be empty')
+        return patch_extract_dir
+
+    def get_absolute_file_paths_in_dir(self, dir : str) -> list:
+        directory_path = Path(dir)
+        return [str(file.absolute()) for file in directory_path.rglob('*') if file.is_file()]
+
+    def apply_patch_file(self, patch_file_abs_path : str) -> None:
+        relpath = os.path.relpath(patch_file_abs_path, self.dirname)
+        if PATCH:
+            # Always pass a POSIX path to patch, because on Windows it's MSYS
+            # Ignore whitespace when applying patches to workaround
+            # line-ending differences
+            cmd = [PATCH, '-l', '-f', '-p1', '-i', str(Path(relpath).as_posix())]
+        elif GIT:
+            # If the `patch` command is not available, fall back to `git
+            # apply`. The `--work-tree` is necessary in case we're inside a
+            # Git repository: by default, Git will try to apply the patch to
+            # the repository root.
+            cmd = [GIT, '--work-tree', '.', 'apply', '--ignore-whitespace', '-p1', relpath]
+        else:
+            raise WrapException('Missing "patch" or "git" commands to apply diff files')
+
+        p, out, _ = Popen_safe(cmd, cwd=self.dirname, stderr=subprocess.STDOUT)
+        if p.returncode != 0:
+            mlog.log(out.strip())
+            raise WrapException(f'Failed to apply diff file "{os.path.basename(patch_file_abs_path)}"')
+
+    def apply_patch_files(self, patch_files : list[str]) -> None:
+        for file in patch_files:
+            self.apply_patch_file(file)
+        return
+
     def apply_patch(self, packagename: str) -> None:
         if 'patch_filename' in self.wrap.values and 'patch_directory' in self.wrap.values:
             m = f'Wrap file {self.wrap.name!r} must not have both "patch_filename" and "patch_directory"'
             raise WrapException(m)
         if 'patch_filename' in self.wrap.values:
             path = self._get_file_internal('patch', packagename)
+            # Create a separate directory (at the same level) to host extracted patch files for the package
+            patch_extract_dir = self.ensure_patch_extract_dir(packagename)
             try:
-                shutil.unpack_archive(path, self.subdir_root)
+                shutil.unpack_archive(path, patch_extract_dir)
             except Exception:
                 with tempfile.TemporaryDirectory() as workdir:
                     shutil.unpack_archive(path, workdir)
-                    self.copy_tree(workdir, self.subdir_root)
+                    self.copy_tree(workdir, patch_extract_dir)
+            # Apply patch
+            patch_files = self.get_absolute_file_paths_in_dir(patch_extract_dir)
+            self.apply_patch_files(patch_files)
         elif 'patch_directory' in self.wrap.values:
             patch_dir = self.wrap.values['patch_directory']
             src_dir = os.path.join(self.wrap.filesdir, patch_dir)
@@ -833,25 +876,7 @@ class Resolver:
             path = Path(self.wrap.filesdir) / filename
             if not path.exists():
                 raise WrapException(f'Diff file "{path}" does not exist')
-            relpath = os.path.relpath(str(path), self.dirname)
-            if PATCH:
-                # Always pass a POSIX path to patch, because on Windows it's MSYS
-                # Ignore whitespace when applying patches to workaround
-                # line-ending differences
-                cmd = [PATCH, '-l', '-f', '-p1', '-i', str(Path(relpath).as_posix())]
-            elif GIT:
-                # If the `patch` command is not available, fall back to `git
-                # apply`. The `--work-tree` is necessary in case we're inside a
-                # Git repository: by default, Git will try to apply the patch to
-                # the repository root.
-                cmd = [GIT, '--work-tree', '.', 'apply', '--ignore-whitespace', '-p1', relpath]
-            else:
-                raise WrapException('Missing "patch" or "git" commands to apply diff files')
-
-            p, out, _ = Popen_safe(cmd, cwd=self.dirname, stderr=subprocess.STDOUT)
-            if p.returncode != 0:
-                mlog.log(out.strip())
-                raise WrapException(f'Failed to apply diff file "{filename}"')
+            self.apply_patch_file(str(path))
 
     def copy_tree(self, root_src_dir: str, root_dst_dir: str) -> None:
         """
