@@ -17,4 +17,7 @@ if sys.platform != 'win32':
     data_files = [('share/man/man1', ['man/meson.1']),
                   ('share/polkit-1/actions', ['data/com.mesonbuild.install.policy'])]
 
-setup(data_files=data_files,)
+setup(data_files=data_files, entry_points={
+        'console_scripts': [
+            'build_master_meson=mesonbuild.mesonmain:main',
+        ]})
