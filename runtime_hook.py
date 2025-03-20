@@ -1,5 +1,6 @@
 import os
 import certifi
+import shutil
 
 def detect_os():
     if "MSYSTEM" in os.environ:
@@ -25,20 +26,37 @@ def detect_os():
 
 os_str = detect_os()
 dest_dir = ""
+msys2_path = shutil.which('python3')
+
+def get_root(delimit) -> str:
+    msys2_path = shutil.which('python3')
+    print(msys2_path)
+    msys2_path = msys2_path.replace("\\", "/")
+    msys2_path = msys2_path.replace("//", "/")
+    parts = msys2_path.split('/')  # Split into segments
+    collected_parts = []
+    for part in parts:
+        print(part)
+        if part.lower() == delimit:
+            break
+        collected_parts.append(part)
+    if len(collected_parts) > 0 and collected_parts[0].endswith(':'):
+        collected_parts[0] += '/' 
+    result = os.path.join(*collected_parts, delimit)
+    return result
+
 if "MINGW64" in os_str:
-	dest_dir = "/mingw64"
+    dest_dir = get_root("mingw64")
 elif "MINGW32" in os_str:
-	dest_dir = "/mingw32"
-elif "MSYS" in os_str:
-	dest_dir = "/"
+    dest_dir = get_root("mingw32")
 elif "UCRT64" in os_str:
-	dest_dir = "/ucrt64"
+    dest_dir = get_root("ucrt64")
 elif "CLANG64" in os_str:
-	dest_dir = "/clang64"
+    dest_dir = get_root("clang64")
 elif "Linux" in os_str:
-	dest_dir = "/"
+    dest_dir = "/"
 else:
-	raise Exception("Unrecognized platform")
+    raise Exception("Unrecognized platform")
 
 os.environ["DESTDIR"] = dest_dir
 # Force Python to use the correct CA file
