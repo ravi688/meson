@@ -36,5 +36,5 @@ if [[ "$PLATFORM" == "MINGW" ]]; then
     cp dist/meson.exe "${INSTALL_PREFIX}/bin/build_master_meson.exe"
 else
     echo "Copying dist/meson to ${INSTALL_PREFIX}/bin/build_master_meson"
-    cd $CLONE_PATH && cp dist/meson "${INSTALL_PREFIX}/bin/build_master_meson"
+    cp dist/meson "${INSTALL_PREFIX}/bin/build_master_meson"
 fi
