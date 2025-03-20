@@ -1031,7 +1031,9 @@ class Interpreter(InterpreterBase, HoldableObject):
             result = self._do_subproject_meson(
                     subp_name, subdir, default_options,
                     kwargs, ast,
-                    [str(f) for f in cm_int.bs_files],
+                    # (build_master_meson): Filter out preload.cmake as it is now packaged into the executable itself
+                    # So, it is the executable which should trigger the reconfigure if it gets changed
+                    [str(f) for f in cm_int.bs_files if not str(f).endswith('preload.cmake')],
                     relaxations={
                         InterpreterRuleRelaxation.ALLOW_BUILD_DIR_FILE_REFERENCES,
                     }

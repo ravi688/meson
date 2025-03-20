@@ -18,6 +18,7 @@ import shlex
 import shutil
 import typing as T
 import hashlib
+import sys
 
 from .. import build
 from .. import dependencies
@@ -1369,6 +1370,8 @@ class Backend:
             deps.update(self.environment.coredata.cross_files)
         deps.update(self.environment.coredata.config_files)
         deps.add('meson-private/coredata.dat')
+        # (build_master_meson): If executable (build_master_meson) gets updated then we need to regenerate the backend build script
+        deps.add(sys.executable)
         self.check_clock_skew(deps)
         return list(deps)
 
