@@ -36,7 +36,7 @@ elif "UCRT64" in os_str:
 elif "CLANG64" in os_str:
 	dest_dir = "/clang64"
 elif "Linux" in os_str:
-	dest_dir = "/usr"
+	dest_dir = "/"
 else:
 	raise Exception("Unrecognized platform")
 
