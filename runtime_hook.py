@@ -1,5 +1,5 @@
 import os
-
+import certifi
 
 def detect_os():
     if "MSYSTEM" in os.environ:
@@ -41,3 +41,5 @@ else:
 	raise Exception("Unrecognized platform")
 
 os.environ["DESTDIR"] = dest_dir
+# Force Python to use the correct CA file
+os.environ['SSL_CERT_FILE'] = certifi.where()
