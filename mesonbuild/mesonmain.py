@@ -15,6 +15,7 @@ import os.path
 import platform
 import importlib
 import argparse
+import shutil
 import typing as T
 
 from .utils.core import MesonException, MesonBugException
@@ -309,7 +310,7 @@ def main() -> int:
         assert os.path.isabs(sys.executable)
         launcher = sys.executable
     else:
-        launcher = os.path.abspath(sys.argv[0])
+        launcher = shutil.which(sys.argv[0])
     return run(sys.argv[1:], launcher)
 
 if __name__ == '__main__':
