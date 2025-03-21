@@ -561,6 +561,15 @@ class CoreData:
         return dirty
 
     def set_options(self, opts_to_set: T.Dict[OptionKey, T.Any], subproject: str = '', first_invocation: bool = False) -> bool:
+
+        # In this function (set_options), the keys need to be of type OptionKey, but the user code may also supply keys of type str,
+        # and since python supports dynamic typing, we are converting such str keys to of type OptionKey
+        # NOTE: Remove this conversion would lead to runtime errors, see: https://github.com/ravi688/BuildMaster/issues/82
+        for k, v in opts_to_set.copy().items():
+            if not isinstance(k, OptionKey):
+                del opts_to_set[k]
+                opts_to_set[options.OptionKey.from_string(k)] = v
+
         dirty = False
         if not self.is_cross_build():
             opts_to_set = {k: v for k, v in opts_to_set.items() if k.machine is not MachineChoice.BUILD}

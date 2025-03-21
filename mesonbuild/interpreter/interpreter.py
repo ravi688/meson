@@ -273,9 +273,16 @@ class Interpreter(InterpreterBase, HoldableObject):
                 relaxations: T.Optional[T.Set[InterpreterRuleRelaxation]] = None,
                 user_defined_options: T.Optional[coredata.SharedCMDOptions] = None,
             ) -> None:
+        
+        self.build = _build
+
+        # Apply user supplied command line options to the core data
+        # see: https://github.com/ravi688/BuildMaster/issues/82
+        if not user_defined_options is None:
+            self.build.environment.coredata.set_options(user_defined_options.cmd_line_options)
+        
         super().__init__(_build.environment.get_source_dir(), subdir, subproject, subproject_dir, _build.environment)
         self.active_projectname = ''
-        self.build = _build
         self.backend = backend
         self.summary: T.Dict[str, 'Summary'] = {}
         self.modules: T.Dict[str, NewExtensionModule] = {}
