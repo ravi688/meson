@@ -586,6 +586,7 @@ class Resolver:
             os.mkdir(self.dirname)
             extract_dir = self.dirname
         try:
+            mlog.log('Extracting', mlog.bold(path), mlog.bold(extract_dir))
             shutil.unpack_archive(path, extract_dir)
         except OSError as e:
             raise WrapException(f'failed to unpack archive with error: {str(e)}') from e
@@ -863,7 +864,11 @@ class Resolver:
                     self.copy_tree(workdir, patch_extract_dir)
             # Apply patch
             patch_files = self.get_absolute_file_paths_in_dir(patch_extract_dir)
-            self.apply_patch_files(patch_files)
+            try:
+                self.apply_patch_files(patch_files)
+            except:
+                windows_proof_rmtree(patch_extract_dir)
+                raise
         elif 'patch_directory' in self.wrap.values:
             patch_dir = self.wrap.values['patch_directory']
             src_dir = os.path.join(self.wrap.filesdir, patch_dir)
