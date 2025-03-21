@@ -7,8 +7,10 @@
 # Platform detection
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "mingw"* ]]; then
 	PLATFORM="MINGW"
+	UNSUDO=""
 else
 	PLATFORM="LINUX"
+	UNSUDO="sudo -u $SUDO_USER"
 fi
 
 # Make sure pyinstaller is available
@@ -24,7 +26,7 @@ if ! pip show certifi > /dev/null 2>&1; then
 fi
 
 # Package meson into one executable
-sudo -u $SUDO_USER pyinstaller --onefile --clean --runtime-hook=runtime_hook.py --add-data "$(python -m certifi):certifi" --add-data "mesonbuild:mesonbuild" meson.py
+$UNSUDO pyinstaller --onefile --clean --runtime-hook=runtime_hook.py --add-data "$(python -m certifi):certifi" --add-data "mesonbuild:mesonbuild" meson.py
 
 if [ -z $INSTALL_PREFIX ]; then
 	INSTALL_PREFIX="/usr"
