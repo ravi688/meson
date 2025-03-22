@@ -515,7 +515,7 @@ class Resolver:
                 else:
                     raise WrapException(f'Unknown wrap type {self.wrap.type!r}')
             try:
-                self.apply_patch(packagename)
+                self.apply_patch_or_overlay_files(packagename)
                 self.apply_diff_files()
             except Exception:
                 windows_proof_rmtree(self.dirname)
@@ -821,8 +821,31 @@ class Resolver:
         directory_path = Path(dir)
         return [str(file.absolute()) for file in directory_path.rglob('*') if file.is_file()]
 
-    def apply_patch_file(self, patch_file_abs_path : str) -> None:
-        mlog.log('Applying patch file:', mlog.bold(os.path.relpath(patch_file_abs_path, self.subdir_root)), 'to', mlog.bold(self.wrap.name))
+    @staticmethod
+    def is_patch_file(file_path : str) -> bool:
+        if file_path.endswith('.bmm.patch') or file_path.endswith('.bmm.diff'):
+            return True
+        return False
+
+    # description: it just copies a file at 'rel_file_path' to the subproject's directory
+    #               while also creating any intermediate sub-directories needed
+    # param: rel_file_path: file path relative to self.subdir_root
+    def apply_overlay_file(self, rel_file_path: str, packagename: str):
+        mlog.log('Applying overlay file ', mlog.bold(rel_file_path))
+        non_empty_components = [c for c in rel_file_path.split(os.sep) if c]
+        if not non_empty_components[0].endswith('.patch.dir'):
+            raise WrapException(f'Overlay patch files needs to be extracted in {packagename}.patch.dir')
+        if not os.path.isdir(os.path.join(self.subdir_root, *non_empty_components[0:2])):
+            raise WrapException(f'Overlay patch files must be inside another subdir in {packagename}.patch.dir')
+        dest_path = os.path.join(self.dirname, os.path.join(*non_empty_components[2:]))
+        os.makedirs(os.path.dirname(dest_path), exist_ok = True)
+        shutil.copy2(os.path.join(self.subdir_root, rel_file_path), dest_path)
+        return
+
+    # description: applies a valid diff file to the subproject's directory
+    def apply_diff_file(self, patch_file_abs_path: str):
+        patch_file_path_rel_subdir = os.path.relpath(patch_file_abs_path, self.subdir_root)
+        mlog.log('Applying diff file:', mlog.bold(patch_file_path_rel_subdir), 'to', mlog.bold(self.wrap.name))
         relpath = os.path.relpath(patch_file_abs_path, self.dirname)
         if PATCH:
             # Always pass a POSIX path to patch, because on Windows it's MSYS
@@ -837,18 +860,24 @@ class Resolver:
             cmd = [GIT, '--work-tree', '.', 'apply', '--ignore-whitespace', '-p1', relpath]
         else:
             raise WrapException('Missing "patch" or "git" commands to apply diff files')
-
         p, out, _ = Popen_safe(cmd, cwd=self.dirname, stderr=subprocess.STDOUT)
         if p.returncode != 0:
             mlog.log(out.strip())
             raise WrapException(f'Failed to apply diff file "{os.path.basename(patch_file_abs_path)}"')
-
-    def apply_patch_files(self, patch_files : list[str]) -> None:
-        for file in patch_files:
-            self.apply_patch_file(file)
+        return
+ 
+    # description: applies a file (it can be a *.bmm.patch or *.bmm.diff file) or a regular file need to be overlaid (added)
+    def apply_patch_or_overlay_file(self, patch_file_abs_path : str, packagename : T.Optional[str] = None) -> None:
+        patch_file_path_rel_subdir = os.path.relpath(patch_file_abs_path, self.subdir_root)
+        if self.is_patch_file(patch_file_abs_path):
+            self.apply_diff_file(patch_file_abs_path)
+        else: 
+            if packagename is None:
+                raise WrapException(f'Package name must be given for overlay patch files')
+            self.apply_overlay_file(patch_file_path_rel_subdir, packagename)
         return
 
-    def apply_patch(self, packagename: str) -> None:
+    def apply_patch_or_overlay_files(self, packagename: str) -> None:
         if 'patch_filename' in self.wrap.values and 'patch_directory' in self.wrap.values:
             m = f'Wrap file {self.wrap.name!r} must not have both "patch_filename" and "patch_directory"'
             raise WrapException(m)
@@ -865,7 +894,8 @@ class Resolver:
             # Apply patch
             patch_files = self.get_absolute_file_paths_in_dir(patch_extract_dir)
             try:
-                self.apply_patch_files(patch_files)
+                for file in patch_files:
+                    self.apply_patch_or_overlay_file(file, packagename = packagename)
             except:
                 windows_proof_rmtree(patch_extract_dir)
                 raise
@@ -882,7 +912,7 @@ class Resolver:
             path = Path(self.wrap.filesdir) / filename
             if not path.exists():
                 raise WrapException(f'Diff file "{path}" does not exist')
-            self.apply_patch_file(str(path))
+            self.apply_diff_file(str(path))
 
     def copy_tree(self, root_src_dir: str, root_dst_dir: str) -> None:
         """
