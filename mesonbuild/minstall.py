@@ -14,6 +14,7 @@ import subprocess
 import sys
 import typing as T
 import re
+from pathlib import Path
 
 from . import build, environment
 from .backend.backends import InstallData
@@ -266,8 +267,23 @@ def restore_selinux_contexts() -> None:
               'Standard output:', out,
               'Standard error:', err, sep='\n')
 
+
+# Checks if 'potential_child_path' comes under the 'parent_path'
+# For example, '/path/to/hellworld' comes under '/path/to'
+def is_subpath(parent_path, potential_child_path):
+    # Convert strings to Path objects
+    parent = Path(parent_path).resolve()
+    child = Path(potential_child_path).resolve()
+    
+    # Check if child is a subpath of parent
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
 def get_destdir_path(destdir: str, fullprefix: str, path: str) -> str:
-    if os.path.isabs(path):
+    if os.path.isabs(path) and not is_subpath(destdir, path):
         output = destdir_join(destdir, path)
     else:
         output = os.path.join(fullprefix, path)
