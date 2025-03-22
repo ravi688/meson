@@ -119,6 +119,7 @@ class Runner:
         # FIXME: Do a copy because Resolver.resolve() is stateful method that
         # cannot be called from multiple threads.
         self.wrap_resolver = copy.copy(r)
+        self.subdir_root = r.subdir_root
         self.wrap_resolver.dirname = os.path.join(r.subdir_root, self.wrap.directory)
         self.wrap_resolver.wrap = self.wrap
         self.run_method: T.Callable[[], bool] = self.options.subprojects_func.__get__(self)
@@ -583,14 +584,14 @@ class Runner:
             return False
 
         # Remove subproject's patch extract directory if exists
-        subproject_patch_dir = f'{str(subproject_source_dir)}.patch.dir'
+        subproject_patch_dir = os.path.join(self.subdir_root, f'{self.wrap.name}.patch.dir')
         if os.path.exists(subproject_patch_dir):
             try:
                 if options.confirm:
                     windows_proof_rmtree(subproject_patch_dir)
-                self.log(f'Deleting {subproject_patch_dir}')
+                self.log(f'Deleting {os.path.abspath(subproject_patch_dir)}')
             except OSError as e:
-                mlog.error(f'Unable to remove: {subproject_patch_dir}: {e}')
+                mlog.error(f'Unable to remove: {os.path.abspath(subproject_patch_dir)}: {e}')
                 return False
 
         return True
