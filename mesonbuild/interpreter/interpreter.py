@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-import io, sys, traceback
+import io, sys, traceback, subprocess
 
 from .. import mparser
 from .. import environment
@@ -937,6 +937,12 @@ class Interpreter(InterpreterBase, HoldableObject):
         if method != 'meson':
             m += ['method', mlog.bold(method)]
         mlog.log(*m, '\n', nested=False)
+
+        # Run pre config hook in build master if the project is build master compatible
+        abs_exe_path = Path(shutil.which('build_master'))
+        if abs_exe_path.exists() and Path(os.path.join(subdir, 'build_master.json')).exists():
+            subprocess.run([str(abs_exe_path), '--execute-pre-config-hook', f'--directory={subdir}'], text = True, check = True)
+
 
         methods_map: T.Dict[wrap.Method, T.Callable[[str, str, T.Dict[OptionKey, str, kwtypes.DoSubproject]], SubprojectHolder]] = {
             'meson': self._do_subproject_meson,
