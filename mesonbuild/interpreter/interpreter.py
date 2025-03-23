@@ -940,7 +940,7 @@ class Interpreter(InterpreterBase, HoldableObject):
 
         # Run pre config hook in build master if the project is build master compatible
         abs_exe_path = Path(shutil.which('build_master'))
-        if abs_exe_path.exists() and Path(os.path.join(subdir, 'build_master.json')).exists():
+        if abs_exe_path and abs_exe_path.exists() and Path(os.path.join(subdir, 'build_master.json')).exists():
             subprocess.run([str(abs_exe_path), '--execute-pre-config-hook', f'--directory={subdir}'], text = True, check = True)
 
 
