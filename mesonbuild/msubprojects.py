@@ -325,6 +325,12 @@ class Runner:
                 self.log('  -> Not a git repository.')
                 self.log('Pass --reset option to delete directory and redownload.')
                 return False
+        # Restore any changes introduced by patch/diff files
+        try:
+            self.git_output(['restore', '.'])
+        except:
+            self.log('  -> Failed to restore changed files in', mlog.bold(self.repo_dir))
+            return False
         revision_val = self.wrap.values.get('revision')
         revision = revision_val if revision_val.upper() != 'HEAD' else 'HEAD'
         url = self.wrap.values.get('url')
@@ -469,6 +475,7 @@ class Runner:
             self.log('  -> Cannot update', self.wrap.type, 'subproject')
         if success and os.path.isdir(self.repo_dir):
             self.wrap.update_hash_cache(self.repo_dir)
+        self.wrap_resolver.apply_patches_and_diffs(self.wrap.name)
         return success
 
     def checkout(self) -> bool:

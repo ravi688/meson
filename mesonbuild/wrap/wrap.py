@@ -425,6 +425,16 @@ class Resolver:
                 return wrap_name
         return None
 
+    # is_remove_subproject_dir: if true, then the subproject's directory will be removed if an exception occurs while applying the patch
+    def apply_patches_and_diffs(self, packagename: str, is_dir_exists_ok: bool = True, is_remove_subproject_dir: bool = False):
+        try:
+            self.apply_patch_or_overlay_files(packagename, is_dir_exists_ok)
+            self.apply_diff_files()
+        except Exception:
+            if is_remove_subproject_dir:
+                windows_proof_rmtree(self.dirname)
+            raise
+
     def resolve(self, packagename: str, force_method: T.Optional[Method] = None) -> T.Tuple[str, Method]:
         wrap = self.wraps.get(packagename)
         if wrap is None:
@@ -514,12 +524,7 @@ class Resolver:
                     rel_path = os.path.relpath(self.dirname, self.source_dir)
                 else:
                     raise WrapException(f'Unknown wrap type {self.wrap.type!r}')
-            try:
-                self.apply_patch_or_overlay_files(packagename)
-                self.apply_diff_files()
-            except Exception:
-                windows_proof_rmtree(self.dirname)
-                raise
+            self.apply_patches_and_diffs(packagename, is_dir_exists_ok=False, is_remove_subproject_dir=True)
 
         if not has_buildfile():
             raise WrapException(f'Subproject exists but has no {methods_map[method]} file.')
@@ -809,11 +814,12 @@ class Resolver:
 
             return path.as_posix()
 
-    def ensure_patch_extract_dir(self, packagename: str) -> str:
+    # is_dir_exists_ok: if false, then a WrapException will be thrown if the patch extract directory already exists and is non-empty
+    def ensure_patch_extract_dir(self, packagename: str, is_dir_exists_ok: bool = True) -> str:
         patch_extract_dir = os.path.join(self.subdir_root, f'{packagename}.patch.dir')
         if not os.path.exists(patch_extract_dir):
             os.mkdir(patch_extract_dir)
-        elif not len(os.listdir(patch_extract_dir)) == 0:
+        elif not is_dir_exists_ok and not len(os.listdir(patch_extract_dir)) == 0:
             raise WrapException(f'Patch extract dir: {patch_extract_dir} either shouldn\'t exist or it should be empty')
         return patch_extract_dir
 
@@ -877,14 +883,15 @@ class Resolver:
             self.apply_overlay_file(patch_file_path_rel_subdir, packagename)
         return
 
-    def apply_patch_or_overlay_files(self, packagename: str) -> None:
+    # is_dir_exists_ok: if false, then a WrapException will be thrown if the patch extract directory already exists and is non-empty
+    def apply_patch_or_overlay_files(self, packagename: str, is_dir_exists_ok: bool = True) -> None:
         if 'patch_filename' in self.wrap.values and 'patch_directory' in self.wrap.values:
             m = f'Wrap file {self.wrap.name!r} must not have both "patch_filename" and "patch_directory"'
             raise WrapException(m)
         if 'patch_filename' in self.wrap.values:
             path = self._get_file_internal('patch', packagename)
             # Create a separate directory (at the same level) to host extracted patch files for the package
-            patch_extract_dir = self.ensure_patch_extract_dir(packagename)
+            patch_extract_dir = self.ensure_patch_extract_dir(packagename, is_dir_exists_ok)
             try:
                 shutil.unpack_archive(path, patch_extract_dir)
             except Exception:
@@ -905,6 +912,10 @@ class Resolver:
             if not os.path.isdir(src_dir):
                 raise WrapException(f'patch directory does not exist: {patch_dir}')
             self.copy_tree(src_dir, self.dirname)
+
+    # Alias to apply_patch_or_overlay_files(), for backward compatiblity reasons
+    def apply_patch(self, packagename: str, is_dir_exists_ok: bool = True) -> None:
+        self.apply_patch_or_overlay_files(packagename, is_dir_exists_ok)
 
     def apply_diff_files(self) -> None:
         for filename in self.wrap.diff_files:
