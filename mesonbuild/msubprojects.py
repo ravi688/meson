@@ -449,7 +449,7 @@ class Runner:
     def update(self) -> bool:
         self.log(f'Updating {self.wrap.name}...')
         success = False
-        if not os.path.isdir(self.repo_dir):
+        if not os.path.isdir(self.repo_dir) or self.repo_dir.endswith('.patch.dir'):
             self.log('  -> Not used.')
             # It is not an error if we are updating all subprojects.
             success = not self.options.subprojects
