@@ -2,15 +2,30 @@
 
 # example: INSTALL_PREFIX=/usr ./install_meson.sh
 
+set -e
+
 # ---------------- Install build_master_meson ----------------------
 
 # Platform detection
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "mingw"* ]]; then
 	PLATFORM="MINGW"
-	UNSUDO=""
 else
 	PLATFORM="LINUX"
-	UNSUDO="sudo -u $SUDO_USER"
+        if [ "$EUID" -ne 0 ]; then
+                echo "This script must be run as root. Please use sudo."
+                exit -1
+        fi
+
+        is_in_docker() {
+                [ -f "/.dockerenv" ] || grep -qa docker /proc/1/cgroup
+        }
+
+        # Detect if we are running on docker container
+        if is_in_docker || [ -z "${SUDO_USER-}"]; then
+                NO_ROOT=""
+        else
+                NO_ROOT="sudo -u $SUDO_USER"
+        fi
 fi
 
 # Make sure pyinstaller is available
@@ -26,7 +41,7 @@ if ! pip show certifi > /dev/null 2>&1; then
 fi
 
 # Package meson into one executable
-$UNSUDO pyinstaller --onefile --clean --runtime-hook=runtime_hook.py --add-data "$(python -m certifi):certifi" --add-data "mesonbuild:mesonbuild" meson.py
+$NO_ROOT pyinstaller --onefile --clean --runtime-hook=runtime_hook.py --add-data "$(python -m certifi):certifi" --add-data "mesonbuild:mesonbuild" meson.py
 
 if [ -z $INSTALL_PREFIX ]; then
 	INSTALL_PREFIX="/usr"
