@@ -28,9 +28,26 @@ else
         fi
 fi
 
+# Make sure python is available
+if command -v python >/dev/null 2>&1; then
+    echo "Python is already installed."
+else
+    echo "Python not found. Installing..."
+    apt-get update
+    apt-get install -y python3
+    apt-get install -y python-is-python3
+fi
+
 # Make sure pyinstaller is available
 if ! command -v pyinstaller &> /dev/null; then
 	echo "pyinstaller not avaiable, installing it using pip"
+	if command -v pip >/dev/null 2>&1; then
+    		echo "pip is already installed."
+	else
+    		echo "pip not found. Installing..."
+		apt-get update
+		apt-get install -y python3-pip
+	fi
 	pip install --break-system-packages pyinstaller
 fi
 
