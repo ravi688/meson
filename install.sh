@@ -57,6 +57,8 @@ if ! pip show certifi > /dev/null 2>&1; then
 	pip install --break-system-packages certifi
 fi
 
+# On Proxmox containers, the path /usr/local/bin is not added to PATH variable by default
+export PATH=$PATH:/usr/local/bin
 # Package meson into one executable
 $NO_ROOT pyinstaller --onefile --clean --runtime-hook=runtime_hook.py --add-data "$(python -m certifi):certifi" --add-data "mesonbuild:mesonbuild" meson.py
 
