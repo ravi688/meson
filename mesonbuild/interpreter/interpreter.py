@@ -291,11 +291,6 @@ class Interpreter(InterpreterBase, HoldableObject):
         
         self.build = _build
 
-        # Apply user supplied command line options to the core data
-        # see: https://github.com/ravi688/BuildMaster/issues/82
-        if not user_defined_options is None:
-            self.build.environment.coredata.set_options(user_defined_options.cmd_line_options)
-        
         super().__init__(_build.environment.get_source_dir(), subdir, subproject, subproject_dir, _build.environment)
         self.active_projectname = ''
         self.build = _build
