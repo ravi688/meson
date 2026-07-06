@@ -11,7 +11,7 @@ if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "mingw"* ]]; 
 	PLATFORM="MINGW"
 else
 	PLATFORM="LINUX"
-        if [[ "$INSTALL_PREFIX" = /* ]] && [ "$EUID" -ne 0 ]; then
+        if [[ "$INSTALL_PREFIX" = /usr/* ]] && [ "$EUID" -ne 0 ]; then
                 echo "This script must be run as root. Please use sudo."
                 exit -1
         fi
