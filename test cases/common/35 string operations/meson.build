@@ -54,6 +54,9 @@ assert('#include <foo/bar.h>'.underscorify() == '_include__foo_bar_h_', 'Broken 
 assert('Do SomeThing 09'.underscorify() == 'Do_SomeThing_09', 'Broken underscorify')
 
 assert('3'.to_int() == 3, 'String int conversion does not work.')
+assert('0x10'.to_int() == 16, 'Hex string conversion does not work.')
+assert('0o10'.to_int() == 8, 'Octal string conversion does not work.')
+assert('0b10'.to_int() == 2, 'Binary string conversion does not work.')
 
 assert(true.to_string() == 'true', 'bool string conversion failed')
 assert(false.to_string() == 'false', 'bool string conversion failed')
@@ -66,6 +69,12 @@ assert(' '.join(['a', 'b', 'c']) == 'a b c', 'join() array broken')
 assert(''.join(['a', 'b', 'c']) == 'abc', 'empty join() broken')
 assert(' '.join(['a']) == 'a', 'single join broken')
 assert(' '.join(['a'], ['b', ['c']], 'd') == 'a b c d', 'varargs join broken')
+
+# meson.version() has it's own cmp method
+assert(meson.version().version_compare('>1.1.0'), 'meson version compare 1 arg broken')
+assert(meson.version().version_compare('>1.1.0', '<10.0.0'), 'meson version compare 2 args broken')
+assert(not meson.version().version_compare('<1.1.0', '<1.0.0'), 'meson version compare 2 args broken')
+assert(meson.version().version_compare('!= 1.9.1', '> 1.8.0'), 'meson version compare neq broken')
 
 version_number = '1.2.8'
 

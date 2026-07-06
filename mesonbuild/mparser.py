@@ -95,10 +95,12 @@ class Token(T.Generic[TV_TokenTypes]):
         return NotImplemented
 
 
-IDENT_RE = re.compile('[_a-zA-Z][_0-9a-zA-Z]*')
+IDENT_RE_STR = r'[_a-zA-Z][_0-9a-zA-Z]*'
+IDENT_RE = re.compile(IDENT_RE_STR)
+IDENT_RE_MACHINEFILE = re.compile(IDENT_RE_STR + '|~')
 
 class Lexer:
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, machinefile: bool = False):
         if code.startswith(codecs.BOM_UTF8.decode('utf-8')):
             line, *_ = code.split('\n', maxsplit=1)
             raise ParseException('Builder file must be encoded in UTF-8 (with no BOM)', line, lineno=0, colno=0)
@@ -116,38 +118,41 @@ class Lexer:
             ('whitespace', re.compile(r'[ \t]+')),
             ('multiline_fstring', re.compile(r"f'''(.|\n)*?'''", re.M)),
             ('fstring', re.compile(r"f'([^'\\]|(\\.))*'")),
-            ('id', IDENT_RE),
+            ('id', IDENT_RE_MACHINEFILE if machinefile else IDENT_RE),
             ('number', re.compile(r'0[bB][01]+|0[oO][0-7]+|0[xX][0-9a-fA-F]+|0|[1-9]\d*')),
             ('eol_cont', re.compile(r'\\[ \t]*(#.*)?\n')),
-            ('eol', re.compile(r'\n')),
             ('multiline_string', re.compile(r"'''(.|\n)*?'''", re.M)),
             ('comment', re.compile(r'#.*')),
-            ('lparen', re.compile(r'\(')),
-            ('rparen', re.compile(r'\)')),
-            ('lbracket', re.compile(r'\[')),
-            ('rbracket', re.compile(r'\]')),
-            ('lcurl', re.compile(r'\{')),
-            ('rcurl', re.compile(r'\}')),
-            ('dblquote', re.compile(r'"')),
             ('string', re.compile(r"'([^'\\]|(\\.))*'")),
-            ('comma', re.compile(r',')),
             ('plusassign', re.compile(r'\+=')),
-            ('dot', re.compile(r'\.')),
-            ('plus', re.compile(r'\+')),
-            ('dash', re.compile(r'-')),
-            ('star', re.compile(r'\*')),
-            ('percent', re.compile(r'%')),
-            ('fslash', re.compile(r'/')),
-            ('colon', re.compile(r':')),
             ('equal', re.compile(r'==')),
             ('nequal', re.compile(r'!=')),
-            ('assign', re.compile(r'=')),
             ('le', re.compile(r'<=')),
-            ('lt', re.compile(r'<')),
             ('ge', re.compile(r'>=')),
-            ('gt', re.compile(r'>')),
-            ('questionmark', re.compile(r'\?')),
         ]
+
+        self.single_char_tokens = {
+            '\n': 'eol',
+            '(': 'lparen',
+            ')': 'rparen',
+            '[': 'lbracket',
+            ']': 'rbracket',
+            '{': 'lcurl',
+            '}': 'rcurl',
+            '"': 'dblquote',
+            ',': 'comma',
+            '.': 'dot',
+            '+': 'plus',
+            '-': 'dash',
+            '*': 'star',
+            '%': 'percent',
+            '/': 'fslash',
+            ':': 'colon',
+            '=': 'assign',
+            '<': 'lt',
+            '>': 'gt',
+            '?': 'questionmark',
+        }
 
     def getline(self, line_start: int) -> str:
         return self.code[line_start:self.code.find('\n', line_start)]
@@ -159,22 +164,25 @@ class Lexer:
         par_count = 0
         bracket_count = 0
         curl_count = 0
-        col = 0
-        while loc < len(self.code):
-            matched = False
-            value: str = ''
-            for (tid, reg) in self.token_specification:
-                mo = reg.match(self.code, loc)
-                if mo:
-                    curline = lineno
-                    curline_start = line_start
-                    col = mo.start() - line_start
-                    matched = True
-                    span_start = loc
-                    loc = mo.end()
-                    span_end = loc
-                    bytespan = (span_start, span_end)
-                    value = mo.group()
+        try:
+            while loc < len(self.code):
+                value: str
+                span_start = loc
+                col = loc - line_start
+                curline = lineno
+                curline_start = line_start
+                for (tid, reg) in self.token_specification:
+                    mo = reg.match(self.code, loc)
+                    if mo:
+                        value = mo.group()
+                        loc = mo.end()
+                        break
+                else:
+                    # lex single characters and raise an exception for invalid tokens
+                    value = self.code[loc]
+                    tid = self.single_char_tokens[value]
+                    loc += 1
+
                     if tid == 'lparen':
                         par_count += 1
                     elif tid == 'rparen':
@@ -189,39 +197,41 @@ class Lexer:
                         curl_count -= 1
                     elif tid == 'dblquote':
                         raise ParseException('Double quotes are not supported. Use single quotes.', self.getline(line_start), lineno, col)
-                    elif tid in {'string', 'fstring'}:
-                        if value.find("\n") != -1:
-                            msg = ("Newline character in a string detected, use ''' (three single quotes) "
-                                   "for multiline strings instead.\n"
-                                   "This will become a hard error in a future Meson release.")
-                            mlog.warning(mlog.code_line(msg, self.getline(line_start), col), location=BaseNode(lineno, col, filename))
-                        value = value[2 if tid == 'fstring' else 1:-1]
-                    elif tid in {'multiline_string', 'multiline_fstring'}:
-                        value = value[4 if tid == 'multiline_fstring' else 3:-3]
-                        lines = value.split('\n')
-                        if len(lines) > 1:
-                            lineno += len(lines) - 1
-                            line_start = mo.end() - len(lines[-1])
-                    elif tid == 'eol_cont':
-                        lineno += 1
-                        line_start = loc
-                        tid = 'whitespace'
                     elif tid == 'eol':
                         lineno += 1
                         line_start = loc
                         if par_count > 0 or bracket_count > 0 or curl_count > 0:
                             tid = 'whitespace'
-                    elif tid == 'id':
-                        if value in self.keywords:
-                            tid = value
-                        else:
-                            if value in self.future_keywords:
-                                mlog.warning(f"Identifier '{value}' will become a reserved keyword in a future release. Please rename it.",
-                                             location=BaseNode(lineno, col, filename))
-                    yield Token(tid, filename, curline_start, curline, col, bytespan, value)
-                    break
-            if not matched:
-                raise ParseException('lexer', self.getline(line_start), lineno, col)
+
+                if tid == 'id':
+                    if value in self.keywords:
+                        tid = value
+                    else:
+                        if value in self.future_keywords:
+                            mlog.warning(f"Identifier '{value}' will become a reserved keyword in a future release. Please rename it.",
+                                         location=BaseNode(lineno, col, filename))
+                elif tid in {'string', 'fstring'}:
+                    if value.find("\n") != -1:
+                        msg = ("Newline character in a string detected, use ''' (three single quotes) "
+                               "for multiline strings instead.\n"
+                               "This will become a hard error in a future Meson release.")
+                        mlog.warning(mlog.code_line(msg, self.getline(line_start), col), location=BaseNode(lineno, col, filename))
+                    value = value[2 if tid == 'fstring' else 1:-1]
+                elif tid in {'multiline_string', 'multiline_fstring'}:
+                    value = value[4 if tid == 'multiline_fstring' else 3:-3]
+                    lines = value.split('\n')
+                    if len(lines) > 1:
+                        lineno += len(lines) - 1
+                        line_start = loc - len(lines[-1]) - 3
+                elif tid == 'eol_cont':
+                    lineno += 1
+                    line_start = loc
+                    tid = 'whitespace'
+                bytespan = (span_start, loc)
+                yield Token(tid, filename, curline_start, curline, col, bytespan, value)
+
+        except KeyError:
+            raise ParseException(f'lexer: unrecognized token {self.code[loc]!r}', self.getline(line_start), lineno, loc - line_start)
 
 @dataclass
 class BaseNode:
@@ -369,6 +379,13 @@ class ArgumentNode(BaseNode):
             mlog.warning('This will be an error in Meson 2.0.')
         self.kwargs[name] = value
 
+    def get_kwarg_or_default(self, name: str, default: BaseNode) -> BaseNode:
+        for k, v in self.kwargs.items():
+            assert isinstance(k, IdNode)
+            if k.value == name:
+                return v
+        return default
+
     def set_kwarg_no_check(self, name: BaseNode, value: BaseNode) -> None:
         self.kwargs[name] = value
 
@@ -444,10 +461,9 @@ class ComparisonNode(BinaryOperatorNode):
 @dataclass(unsafe_hash=True)
 class ArithmeticNode(BinaryOperatorNode):
 
-    # TODO: use a Literal for operation
-    operation: str
+    operation: ARITH_OPERATORS
 
-    def __init__(self, operation: str, left: BaseNode, operator: SymbolNode, right: BaseNode):
+    def __init__(self, operation: ARITH_OPERATORS, left: BaseNode, operator: SymbolNode, right: BaseNode):
         super().__init__(left, operator, right)
         self.operation = operation
 
@@ -649,18 +665,22 @@ class ParenthesizedNode(BaseNode):
     lpar: SymbolNode = field(hash=False)
     inner: BaseNode
     rpar: SymbolNode = field(hash=False)
+    is_multiline: bool
 
     def __init__(self, lpar: SymbolNode, inner: BaseNode, rpar: SymbolNode):
         super().__init__(lpar.lineno, lpar.colno, inner.filename, end_lineno=rpar.lineno, end_colno=rpar.colno+1)
         self.lpar = lpar
         self.inner = inner
         self.rpar = rpar
-
+        self.is_multiline = False
 
 if T.TYPE_CHECKING:
-    COMPARISONS = Literal['==', '!=', '<', '<=', '>=', '>', 'in', 'notin']
+    COMPARISONS = Literal['==', '!=', '<', '<=', '>=', '>', 'in', 'not in']
+    ARITH_OPERATORS = Literal['+', '-', '*', '/', '%']
 
-comparison_map: T.Mapping[str, COMPARISONS] = {
+ALL_STRINGS = frozenset({'string', 'fstring', 'multiline_string', 'multiline_fstring'})
+
+COMPARISON_MAP: T.Mapping[str, COMPARISONS] = {
     'equal': '==',
     'nequal': '!=',
     'lt': '<',
@@ -668,7 +688,18 @@ comparison_map: T.Mapping[str, COMPARISONS] = {
     'gt': '>',
     'ge': '>=',
     'in': 'in',
-    'not in': 'notin',
+    'not in': 'not in',
+}
+
+ADDSUB_MAP: T.Mapping[str, ARITH_OPERATORS] = {
+    'plus': '+',
+    'dash': '-',
+}
+
+MULDIV_MAP: T.Mapping[str, ARITH_OPERATORS] = {
+    'percent': '%',
+    'star': '*',
+    'fslash': '/',
 }
 
 # Recursive descent parser for Meson's definition language.
@@ -676,19 +707,20 @@ comparison_map: T.Mapping[str, COMPARISONS] = {
 # levels so there are not enough words to describe them all.
 # Enter numbering:
 #
-# 1 assignment
-# 2 or
-# 3 and
-# 4 comparison
-# 5 arithmetic
-# 6 negation
-# 7 funcall, method call
-# 8 parentheses
-# 9 plain token
+#  1 assignment
+#  2 or
+#  3 and
+#  4 comparison
+#  5 addition and subtraction
+#  6 multiplication, division and modulus
+#  7 negation
+#  8 funcall, method call
+#  9 parentheses
+# 10 plain token
 
 class Parser:
-    def __init__(self, code: str, filename: str):
-        self.lexer = Lexer(code)
+    def __init__(self, code: str, filename: str, *, machinefile: bool = False):
+        self.lexer = Lexer(code, machinefile=machinefile)
         self.stream = self.lexer.lex(filename)
         self.current: Token = Token('eof', '', 0, 0, 0, (0, 0), None)
         self.previous = self.current
@@ -727,7 +759,7 @@ class Parser:
             return True
         return False
 
-    def accept_any(self, tids: T.Tuple[str, ...]) -> str:
+    def accept_any(self, tids: T.Union[T.AbstractSet[str], T.Mapping[str, object]]) -> str:
         tid = self.current.tid
         if tid in tids:
             self.getsym()
@@ -810,10 +842,10 @@ class Parser:
 
     def e4(self) -> BaseNode:
         left = self.e5()
-        for nodename, operator_type in comparison_map.items():
-            if self.accept(nodename):
-                operator = self.create_node(SymbolNode, self.previous)
-                return self.create_node(ComparisonNode, operator_type, left, operator, self.e5())
+        op = self.accept_any(COMPARISON_MAP)
+        if op:
+            operator = self.create_node(SymbolNode, self.previous)
+            return self.create_node(ComparisonNode, COMPARISON_MAP[op], left, operator, self.e5())
         if self.accept('not'):
             ws = self.current_ws.copy()
             not_token = self.previous
@@ -827,54 +859,42 @@ class Parser:
                 not_token.bytespan = (not_token.bytespan[0], in_token.bytespan[1])
                 not_token.value += temp_node.whitespaces.value + in_token.value
                 operator = self.create_node(SymbolNode, not_token)
-                return self.create_node(ComparisonNode, 'notin', left, operator, self.e5())
+                return self.create_node(ComparisonNode, 'not in', left, operator, self.e5())
         return left
 
     def e5(self) -> BaseNode:
-        return self.e5addsub()
-
-    def e5addsub(self) -> BaseNode:
-        op_map = {
-            'plus': 'add',
-            'dash': 'sub',
-        }
-        left = self.e5muldiv()
-        while True:
-            op = self.accept_any(tuple(op_map.keys()))
-            if op:
-                operator = self.create_node(SymbolNode, self.previous)
-                left = self.create_node(ArithmeticNode, op_map[op], left, operator, self.e5muldiv())
-            else:
-                break
-        return left
-
-    def e5muldiv(self) -> BaseNode:
-        op_map = {
-            'percent': 'mod',
-            'star': 'mul',
-            'fslash': 'div',
-        }
         left = self.e6()
         while True:
-            op = self.accept_any(tuple(op_map.keys()))
+            op = self.accept_any(ADDSUB_MAP)
             if op:
                 operator = self.create_node(SymbolNode, self.previous)
-                left = self.create_node(ArithmeticNode, op_map[op], left, operator, self.e6())
+                left = self.create_node(ArithmeticNode, ADDSUB_MAP[op], left, operator, self.e6())
             else:
                 break
         return left
 
     def e6(self) -> BaseNode:
-        if self.accept('not'):
-            operator = self.create_node(SymbolNode, self.previous)
-            return self.create_node(NotNode, self.current, operator, self.e7())
-        if self.accept('dash'):
-            operator = self.create_node(SymbolNode, self.previous)
-            return self.create_node(UMinusNode, self.current, operator, self.e7())
-        return self.e7()
+        left = self.e7()
+        while True:
+            op = self.accept_any(MULDIV_MAP)
+            if op:
+                operator = self.create_node(SymbolNode, self.previous)
+                left = self.create_node(ArithmeticNode, MULDIV_MAP[op], left, operator, self.e7())
+            else:
+                break
+        return left
 
     def e7(self) -> BaseNode:
-        left = self.e8()
+        if self.accept('not'):
+            operator = self.create_node(SymbolNode, self.previous)
+            return self.create_node(NotNode, self.current, operator, self.e8())
+        if self.accept('dash'):
+            operator = self.create_node(SymbolNode, self.previous)
+            return self.create_node(UMinusNode, self.current, operator, self.e8())
+        return self.e8()
+
+    def e8(self) -> BaseNode:
+        left = self.e9()
         block_start = self.current
         if self.accept('lparen'):
             lpar = self.create_node(SymbolNode, block_start)
@@ -897,7 +917,7 @@ class Parser:
                 left = self.index_call(left)
         return left
 
-    def e8(self) -> BaseNode:
+    def e9(self) -> BaseNode:
         block_start = self.current
         if self.accept('lparen'):
             lpar = self.create_node(SymbolNode, block_start)
@@ -918,9 +938,9 @@ class Parser:
             rcurl = self.create_node(SymbolNode, self.previous)
             return self.create_node(DictNode, lcurl, key_values, rcurl)
         else:
-            return self.e9()
+            return self.e10()
 
-    def e9(self) -> BaseNode:
+    def e10(self) -> BaseNode:
         t = self.current
         if self.accept('true'):
             t.value = True
@@ -932,7 +952,7 @@ class Parser:
             return self.create_node(IdNode, t)
         if self.accept('number'):
             return self.create_node(NumberNode, t)
-        if self.accept_any(('string', 'fstring', 'multiline_string', 'multiline_fstring')):
+        if self.accept_any(ALL_STRINGS):
             return self.create_node(StringNode, t)
         return EmptyNode(self.current.lineno, self.current.colno, self.current.filename)
 
@@ -978,7 +998,7 @@ class Parser:
 
     def method_call(self, source_object: BaseNode) -> MethodNode:
         dot = self.create_node(SymbolNode, self.previous)
-        methodname = self.e9()
+        methodname = self.e10()
         if not isinstance(methodname, IdNode):
             if isinstance(source_object, NumberNode) and isinstance(methodname, NumberNode):
                 raise ParseException('meson does not support float numbers',

@@ -4,17 +4,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import subprocess
 import typing as T
 from enum import Enum
+import os
+import platform
+import sys
 
 from . import mesonlib
-from .mesonlib import EnvironmentException, HoldableObject
+from .mesonlib import EnvironmentException, HoldableObject, lazy_property, Popen_safe
+from .programs import ExternalProgram
 from . import mlog
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 if T.TYPE_CHECKING:
     from .options import ElementaryOptionValues
+    from .compilers.compilers import CompilerDict
+    from .compilers.mixins.visualstudio import VisualStudioLikeCompiler
+    from ._typing import ImmutableListProtocol
 
 
 # These classes contains all the data pulled from configuration files (native
@@ -51,6 +57,7 @@ known_cpu_families = (
     'msp430',
     'parisc',
     'pic24',
+    'pic32',
     'ppc',
     'ppc64',
     'riscv32',
@@ -88,64 +95,64 @@ CPU_FAMILIES_64_BIT = [
 ]
 
 # Map from language identifiers to environment variables.
-ENV_VAR_COMPILER_MAP: T.Mapping[str, str] = {
+ENV_VAR_COMPILER_MAP: T.Mapping[str, ImmutableListProtocol[str]] = {
     # Compilers
-    'c': 'CC',
-    'cpp': 'CXX',
-    'cs': 'CSC',
-    'cython': 'CYTHON',
-    'd': 'DC',
-    'fortran': 'FC',
-    'objc': 'OBJC',
-    'objcpp': 'OBJCXX',
-    'rust': 'RUSTC',
-    'vala': 'VALAC',
-    'nasm': 'NASM',
+    'c': ['CC'],
+    'cpp': ['CXX'],
+    'cs': ['CSC'],
+    'cython': ['CYTHON'],
+    'd': ['DC'],
+    'fortran': ['FC'],
+    'objc': ['OBJC'],
+    'objcpp': ['OBJCXX'],
+    'rust': ['RUSTC'],
+    'vala': ['VALAC'],
+    'nasm': ['NASM'],
 
     # Linkers
-    'c_ld': 'CC_LD',
-    'cpp_ld': 'CXX_LD',
-    'd_ld': 'DC_LD',
-    'fortran_ld': 'FC_LD',
-    'objc_ld': 'OBJC_LD',
-    'objcpp_ld': 'OBJCXX_LD',
-    'rust_ld': 'RUSTC_LD',
+    'c_ld': ['CC_LD'],
+    'cpp_ld': ['CXX_LD'],
+    'd_ld': ['DC_LD'],
+    'fortran_ld': ['FC_LD'],
+    'objc_ld': ['OBJC_LD'],
+    'objcpp_ld': ['OBJCXX_LD'],
+    'rust_ld': ['RUSTC_LD'],
 }
 
 # Map from utility names to environment variables.
-ENV_VAR_TOOL_MAP: T.Mapping[str, str] = {
+ENV_VAR_TOOL_MAP: T.Mapping[str, ImmutableListProtocol[str]] = {
     # Binutils
-    'ar': 'AR',
-    'as': 'AS',
-    'ld': 'LD',
-    'nm': 'NM',
-    'objcopy': 'OBJCOPY',
-    'objdump': 'OBJDUMP',
-    'ranlib': 'RANLIB',
-    'readelf': 'READELF',
-    'size': 'SIZE',
-    'strings': 'STRINGS',
-    'strip': 'STRIP',
-    'windres': 'WINDRES',
+    'ar': ['AR'],
+    'as': ['AS'],
+    'ld': ['LD'],
+    'nm': ['NM'],
+    'objcopy': ['OBJCOPY'],
+    'objdump': ['OBJDUMP'],
+    'ranlib': ['RANLIB'],
+    'readelf': ['READELF'],
+    'size': ['SIZE'],
+    'strings': ['STRINGS'],
+    'strip': ['STRIP'],
+    'windres': ['RC', 'WINDRES'],
 
     # Other tools
-    'cmake': 'CMAKE',
-    'qmake': 'QMAKE',
-    'pkg-config': 'PKG_CONFIG',
-    'make': 'MAKE',
-    'vapigen': 'VAPIGEN',
-    'llvm-config': 'LLVM_CONFIG',
+    'cmake': ['CMAKE'],
+    'qmake': ['QMAKE'],
+    'pkg-config': ['PKG_CONFIG'],
+    'make': ['MAKE'],
+    'vapigen': ['VAPIGEN'],
+    'llvm-config': ['LLVM_CONFIG'],
 }
 
 ENV_VAR_PROG_MAP = {**ENV_VAR_COMPILER_MAP, **ENV_VAR_TOOL_MAP}
 
 # Deprecated environment variables mapped from the new variable to the old one
 # Deprecated in 0.54.0
-DEPRECATED_ENV_PROG_MAP: T.Mapping[str, str] = {
-    'd_ld': 'D_LD',
-    'fortran_ld': 'F_LD',
-    'rust_ld': 'RUST_LD',
-    'objcpp_ld': 'OBJCPP_LD',
+DEPRECATED_ENV_PROG_MAP: T.Mapping[str, ImmutableListProtocol[str]] = {
+    'd_ld': ['D_LD'],
+    'fortran_ld': ['F_LD'],
+    'rust_ld': ['RUST_LD'],
+    'objcpp_ld': ['OBJCPP_LD'],
 }
 
 class CMakeSkipCompilerTest(Enum):
@@ -260,8 +267,8 @@ class Properties:
 @dataclass(unsafe_hash=True)
 class MachineInfo(HoldableObject):
     system: str
-    cpu_family: str
-    cpu: str
+    cpu_family: str | None
+    cpu: str | None
     endian: str
     kernel: T.Optional[str]
     subsystem: T.Optional[str]
@@ -312,6 +319,13 @@ class MachineInfo(HoldableObject):
         """
         return self.system == 'cygwin'
 
+    @lazy_property
+    def pure_path_class(self) -> T.Type[PurePath]:
+        """Get the appropriate PurePath class for this machine."""
+        if self.is_windows():
+            return PureWindowsPath
+        return PurePosixPath
+
     def is_linux(self) -> bool:
         """
         Machine is linux?
@@ -320,15 +334,26 @@ class MachineInfo(HoldableObject):
 
     def is_darwin(self) -> bool:
         """
-        Machine is Darwin (iOS/tvOS/OS X)?
+        Machine is Darwin (macOS/iOS/tvOS/visionOS/watchOS)?
         """
-        return self.system in {'darwin', 'ios', 'tvos'}
+        return self.system in {'darwin', 'ios', 'tvos', 'visionos', 'watchos'}
 
     def is_android(self) -> bool:
         """
         Machine is Android?
         """
         return self.system == 'android'
+
+    def is_ohos(self) -> bool:
+        """
+        Machine is OpenHarmony (OHOS)?
+
+        OHOS is modelled as an Android subsystem: it behaves like Android
+        (apps are shared libraries, no versioned sonames, ...) but uses musl
+        instead of Bionic. Machine files select it with system = 'android'
+        and subsystem = 'ohos'.
+        """
+        return self.is_android() and self.subsystem == 'ohos'
 
     def is_haiku(self) -> bool:
         """
@@ -349,7 +374,7 @@ class MachineInfo(HoldableObject):
         return self.system == 'openbsd'
 
     def is_dragonflybsd(self) -> bool:
-        """Machine is DragonflyBSD?"""
+        """Machine is DragonFly BSD?"""
         return self.system == 'dragonfly'
 
     def is_freebsd(self) -> bool:
@@ -376,11 +401,20 @@ class MachineInfo(HoldableObject):
         """Machine is IRIX?"""
         return self.system.startswith('irix')
 
+    def is_os2(self) -> bool:
+        """
+        Machine is OS/2?
+        """
+        return self.system == 'os/2'
+
+    def is_fuchsia(self) -> bool:
+        return self.system == 'fuchsia'
+
     # Various prefixes and suffixes for import libraries, shared libraries,
     # static libraries, and executables.
     # Versioning is added to these names in the backends as-needed.
     def get_exe_suffix(self) -> str:
-        if self.is_windows() or self.is_cygwin():
+        if self.is_windows() or self.is_cygwin() or self.is_os2():
             return 'exe'
         else:
             return ''
@@ -423,31 +457,23 @@ class BinaryTable:
                 del self.binaries['pkgconfig']
 
     @staticmethod
-    def detect_ccache() -> T.List[str]:
-        try:
-            subprocess.check_call(['ccache', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except (OSError, subprocess.CalledProcessError):
-            return []
-        return ['ccache']
+    def detect_ccache() -> ExternalProgram:
+        return ExternalProgram('ccache', silent=True)
 
     @staticmethod
-    def detect_sccache() -> T.List[str]:
-        try:
-            subprocess.check_call(['sccache', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except (OSError, subprocess.CalledProcessError):
-            return []
-        return ['sccache']
+    def detect_sccache() -> ExternalProgram:
+        return ExternalProgram('sccache', silent=True)
 
     @staticmethod
-    def detect_compiler_cache() -> T.List[str]:
+    def detect_compiler_cache() -> ExternalProgram:
         # Sccache is "newer" so it is assumed that people would prefer it by default.
         cache = BinaryTable.detect_sccache()
-        if cache:
+        if cache.found():
             return cache
         return BinaryTable.detect_ccache()
 
     @classmethod
-    def parse_entry(cls, entry: T.Union[str, T.List[str]]) -> T.Tuple[T.List[str], T.List[str]]:
+    def parse_entry(cls, entry: T.Union[str, T.List[str]]) -> T.Tuple[T.List[str], T.Union[None, ExternalProgram]]:
         parts = mesonlib.stringlistify(entry)
         # Ensure ccache exists and remove it if it doesn't
         if parts[0] == 'ccache':
@@ -458,7 +484,7 @@ class BinaryTable:
             ccache = cls.detect_sccache()
         else:
             compiler = parts
-            ccache = []
+            ccache = None
         if not compiler:
             raise EnvironmentException(f'Compiler cache specified without compiler: {parts[0]}')
         # Return value has to be a list of compiler 'choices'
@@ -491,3 +517,263 @@ class CMakeVariables:
 
     def get_variables(self) -> T.Dict[str, T.List[str]]:
         return self.variables
+
+
+# Machine and platform detection functions
+# ========================================
+
+KERNEL_MAPPINGS: T.Mapping[str, str] = {'freebsd': 'freebsd',
+                                        'openbsd': 'openbsd',
+                                        'netbsd': 'netbsd',
+                                        'windows': 'nt',
+                                        'android': 'linux',
+                                        'linux': 'linux',
+                                        'cygwin': 'nt',
+                                        'darwin': 'xnu',
+                                        'ios': 'xnu',
+                                        'tvos': 'xnu',
+                                        'visionos': 'xnu',
+                                        'watchos': 'xnu',
+                                        'dragonfly': 'dragonfly',
+                                        'haiku': 'haiku',
+                                        'gnu': 'gnu',
+                                        'fuchsia': 'fuchsia',
+                                        }
+
+def detect_windows_arch(compilers: CompilerDict) -> str:
+    """
+    Detecting the 'native' architecture of Windows is not a trivial task. We
+    cannot trust that the architecture that Python is built for is the 'native'
+    one because you can run 32-bit apps on 64-bit Windows using WOW64 and
+    people sometimes install 32-bit Python on 64-bit Windows.
+
+    We also can't rely on the architecture of the OS itself, since it's
+    perfectly normal to compile and run 32-bit applications on Windows as if
+    they were native applications. It's a terrible experience to require the
+    user to supply a cross-info file to compile 32-bit applications on 64-bit
+    Windows. Thankfully, the only way to compile things with Visual Studio on
+    Windows is by entering the 'msvc toolchain' environment, which can be
+    easily detected.
+
+    In the end, the sanest method is as follows:
+    1. Check environment variables that are set by Windows and WOW64 to find out
+       if this is x86 (possibly in WOW64), if so use that as our 'native'
+       architecture.
+    2. If the compiler toolchain target architecture is x86, use that as our
+      'native' architecture.
+    3. Otherwise, use the actual Windows architecture
+
+    """
+    os_arch = mesonlib.windows_detect_native_arch()
+    if os_arch == 'x86':
+        return os_arch
+    # If we're on 64-bit Windows, 32-bit apps can be compiled without
+    # cross-compilation. So if we're doing that, just set the native arch as
+    # 32-bit and pretend like we're running under WOW64. Else, return the
+    # actual Windows architecture that we deduced above.
+    for compiler in compilers.values():
+        compiler = T.cast('VisualStudioLikeCompiler', compiler)
+        if compiler.id == 'msvc' and (compiler.target in {'x86', '80x86'}):
+            return 'x86'
+        if compiler.id == 'clang-cl' and (compiler.target in {'x86', 'i686'}):
+            return 'x86'
+        if compiler.id == 'gcc' and compiler.has_builtin_define('__i386__'):
+            return 'x86'
+    return os_arch
+
+def any_compiler_has_define(compilers: CompilerDict, define: str) -> bool:
+    for c in compilers.values():
+        try:
+            if c.has_builtin_define(define):
+                return True
+        except mesonlib.MesonException:
+            # Ignore compilers that do not support has_builtin_define.
+            pass
+    return False
+
+def detect_cpu_family(compilers: CompilerDict) -> str:
+    """
+    Python is inconsistent in its platform module.
+    It returns different values for the same cpu.
+    For x86 it might return 'x86', 'i686' or some such.
+    Do some canonicalization.
+    """
+    if mesonlib.is_windows():
+        trial = detect_windows_arch(compilers)
+    elif mesonlib.is_freebsd() or mesonlib.is_netbsd() or mesonlib.is_openbsd() or mesonlib.is_qnx() or mesonlib.is_aix():
+        trial = platform.processor().lower()
+    else:
+        trial = platform.machine().lower()
+    if trial.startswith('i') and trial.endswith('86'):
+        trial = 'x86'
+    elif trial == 'bepc':
+        trial = 'x86'
+    elif trial == 'arm64':
+        trial = 'aarch64'
+    elif trial.startswith('aarch64'):
+        # This can be `aarch64_be`
+        trial = 'aarch64'
+    elif trial.startswith('arm') or trial.startswith('earm'):
+        trial = 'arm'
+    elif trial.startswith(('powerpc64', 'ppc64')):
+        trial = 'ppc64'
+    elif trial.startswith(('powerpc', 'ppc')) or trial in {'macppc', 'power macintosh'}:
+        trial = 'ppc'
+    elif trial in {'amd64', 'x64', 'i86pc'}:
+        trial = 'x86_64'
+    elif trial in {'sun4u', 'sun4v'}:
+        trial = 'sparc64'
+    elif trial.startswith('mips'):
+        if '64' not in trial:
+            trial = 'mips'
+        else:
+            trial = 'mips64'
+    elif trial in {'ip30', 'ip35'}:
+        trial = 'mips64'
+
+    # On Linux (and maybe others) there can be any mixture of 32/64 bit code in
+    # the kernel, Python, system, 32-bit chroot on 64-bit host, etc. The only
+    # reliable way to know is to check the compiler defines.
+    if trial == 'x86_64':
+        if any_compiler_has_define(compilers, '__i386__'):
+            trial = 'x86'
+    elif trial == 'aarch64':
+        if any_compiler_has_define(compilers, '__arm__'):
+            trial = 'arm'
+    # Add more quirks here as bugs are reported. Keep in sync with detect_cpu()
+    # below.
+    elif trial == 'parisc64':
+        # ATM there is no 64 bit userland for PA-RISC. Thus always
+        # report it as 32 bit for simplicity.
+        trial = 'parisc'
+    elif trial == 'ppc':
+        # AIX always returns powerpc, check here for 64-bit
+        if any_compiler_has_define(compilers, '__64BIT__'):
+            trial = 'ppc64'
+    # MIPS64 is able to run MIPS32 code natively, so there is a chance that
+    # such mixture mentioned above exists.
+    elif trial == 'mips64':
+        if compilers and not any_compiler_has_define(compilers, '__mips64'):
+            trial = 'mips'
+
+    if trial not in known_cpu_families:
+        mlog.warning(f'Unknown CPU family {trial!r}, please report this at '
+                     'https://github.com/mesonbuild/meson/issues/new with the '
+                     'output of `uname -a` and `cat /proc/cpuinfo`')
+
+    return trial
+
+def detect_cpu(compilers: CompilerDict) -> str:
+    if mesonlib.is_windows():
+        trial = detect_windows_arch(compilers)
+    elif mesonlib.is_freebsd() or mesonlib.is_netbsd() or mesonlib.is_openbsd() or mesonlib.is_aix():
+        trial = platform.processor().lower()
+    else:
+        trial = platform.machine().lower()
+
+    if trial in {'amd64', 'x64', 'i86pc'}:
+        trial = 'x86_64'
+    if trial == 'x86_64':
+        # Same check as above for cpu_family
+        if any_compiler_has_define(compilers, '__i386__'):
+            trial = 'i686' # All 64 bit cpus have at least this level of x86 support.
+    elif trial.startswith('aarch64') or trial.startswith('arm64'):
+        # Same check as above for cpu_family
+        if any_compiler_has_define(compilers, '__arm__'):
+            trial = 'arm'
+        else:
+            # for aarch64_be
+            trial = 'aarch64'
+    elif trial.startswith('earm'):
+        trial = 'arm'
+    elif trial == 'e2k':
+        # Make more precise CPU detection for Elbrus platform.
+        trial = platform.processor().lower()
+    elif trial.startswith('mips'):
+        if '64' not in trial:
+            trial = 'mips'
+        else:
+            if compilers and not any_compiler_has_define(compilers, '__mips64'):
+                trial = 'mips'
+            else:
+                trial = 'mips64'
+    elif trial == 'ppc':
+        # AIX always returns powerpc, check here for 64-bit
+        if any_compiler_has_define(compilers, '__64BIT__'):
+            trial = 'ppc64'
+
+    # Add more quirks here as bugs are reported. Keep in sync with
+    # detect_cpu_family() above.
+    return trial
+
+def detect_kernel(system: str) -> T.Optional[str]:
+    if system == 'sunos':
+        # Solaris 5.10 uname doesn't support the -o switch, and illumos started
+        # with version 5.11 so shortcut the logic to report 'solaris' in such
+        # cases where the version is 5.10 or below.
+        if mesonlib.version_compare(platform.uname().release, '<=5.10'):
+            return 'solaris'
+        # This needs to be /usr/bin/uname because gnu-uname could be installed and
+        # won't provide the necessary information
+        p, out, _ = Popen_safe(['/usr/bin/uname', '-o'])
+        if p.returncode != 0:
+            raise mesonlib.MesonException('Failed to run "/usr/bin/uname -o"')
+        out = out.lower().strip()
+        if out not in {'illumos', 'solaris'}:
+            mlog.warning(f'Got an unexpected value for kernel on a SunOS derived platform, expected either "illumos" or "solaris", but got "{out}".'
+                         "Please open a Meson issue with the OS you're running and the value detected for your kernel.")
+            return None
+        return out
+    return KERNEL_MAPPINGS.get(system, None)
+
+def detect_subsystem(system: str) -> T.Optional[str]:
+    if system == 'darwin':
+        return 'macos'
+    return system
+
+def detect_system() -> str:
+    if sys.platform == 'cygwin':
+        return 'cygwin'
+    return platform.system().lower()
+
+def detect_msys2_arch() -> T.Optional[str]:
+    return os.environ.get('MSYSTEM_CARCH', None)
+
+def detect_machine_info(compilers: T.Optional[CompilerDict] = None) -> MachineInfo:
+    """Detect the machine we're running on
+
+    If compilers are not provided, we cannot know as much. None out those
+    fields to avoid accidentally depending on partial knowledge. The
+    underlying ''detect_*'' method can be called to explicitly use the
+    partial information.
+    """
+    system = detect_system()
+    return MachineInfo(
+        system,
+        detect_cpu_family(compilers) if compilers is not None else None,
+        detect_cpu(compilers) if compilers is not None else None,
+        sys.byteorder,
+        detect_kernel(system),
+        detect_subsystem(system))
+
+# TODO make this compare two `MachineInfo`s purely. How important is the
+# `detect_cpu_family({})` distinction? It is the one impediment to that.
+def machine_info_can_run(machine_info: MachineInfo) -> bool:
+    """Whether we can run binaries for this machine on the current machine.
+
+    Can almost always run 32-bit binaries on 64-bit natively if the host
+    and build systems are the same. We don't pass any compilers to
+    detect_cpu_family() here because we always want to know the OS
+    architecture, not what the compiler environment tells us.
+    """
+    system = detect_system()
+    if machine_info.system != system:
+        return False
+    if machine_info.subsystem and machine_info.subsystem != detect_subsystem(system):
+        return False
+    true_build_cpu_family = detect_cpu_family({})
+    assert machine_info.cpu_family is not None, 'called on incomplete machine_info'
+    return \
+        (machine_info.cpu_family == true_build_cpu_family) or \
+        ((true_build_cpu_family == 'x86_64') and (machine_info.cpu_family == 'x86')) or \
+        ((true_build_cpu_family == 'mips64') and (machine_info.cpu_family == 'mips'))

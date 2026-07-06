@@ -131,8 +131,8 @@ typelib_target]`
 Generates a marshal file using the `glib-genmarshal` tool. The first
 argument is the basename of the output files.
 
-* `depends` [](BuildTarget | CustomTarget | CustomTargetIndex):
-  passed directly to CustomTarget (*since 0.61.0*)
+* `depends` [](BuildTarget | CustomTarget | CustomTargetIndex | Program):
+  passed directly to CustomTarget (*since 0.61.0*; `program` *since 1.11.2*)
 * `depend_files` [](str | File): Passed directly to CustomTarget (*since 0.61.0*)
 * `extra_args`: (*Added 0.42.0*) additional command line arguments to pass
 * `install_dir`: directory to install header to
@@ -144,7 +144,7 @@ argument is the basename of the output files.
 * `nostdinc`: if true, don't include the standard marshallers from glib
 * `prefix`: the prefix to use for symbols
 * `skip_source`: if true, skip source location comments
-* `sources` [](str | File) *required*: the list of sources to use as inputs
+* `sources` [](str | File | CustomTarget | CustomTargetIndex | generator_output) *required*: the list of sources to use as inputs (build-time generated files only allowed *since 1.12.0*)
 * `stdinc`: if true, include the standard marshallers from glib
 * `valist_marshallers`: if true, generate va_list marshallers
 
@@ -280,6 +280,8 @@ one XML file.
 * `object_manager`: *(Added 0.40.0)* if true generates object manager code
 * `annotations`: *(Added 0.43.0)* list of lists of 3 strings for the annotation for `'ELEMENT', 'KEY', 'VALUE'`
 * `docbook`: *(Added 0.43.0)* prefix to generate `'PREFIX'-NAME.xml` docbooks
+* `rst`: *(Added 1.9.0)* prefix to generate `'PREFIX'-NAME.rst` reStructuredTexts
+* `markdown`: *(Added 1.9.0)* prefix to generate `'PREFIX'-NAME.md` markdowns
 * `build_by_default`: causes, when set to true, to have this target be
   built by default, that is, when invoking plain `meson compile`, the default
   value is true for all built target types
@@ -289,8 +291,9 @@ one XML file.
 
 Starting *0.46.0*, this function returns a list of at least two custom
 targets (in order): one for the source code and one for the header.
-The list will contain a third custom target for the generated docbook
-files if that keyword argument is passed.
+The list can then contain other custom targets for the generated documentation
+files depending if the keyword argument is passed (in order): the docbook
+target, the reStructuredText target and the markdown target.
 
 Earlier versions return a single custom target representing all the
 outputs. Generally, you should just add this list of targets to a top
@@ -323,7 +326,8 @@ library.
 * `install_dir`: location to install the VAPI file (defaults to datadir/vala/vapi)
 * `metadata_dirs`: extra directories to include for metadata files
 * `packages`: VAPI packages that are depended upon
-* `sources`: the gir source to generate the VAPI from
+* `sources`: the gir source to generate the VAPI from (File objects
+  only supported *since 1.12.0*)
 * `vapi_dirs`: extra directories to include for VAPI files
 
 Returns a custom dependency that can be included when building other

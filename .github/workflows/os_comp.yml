@@ -42,24 +42,13 @@ jobs:
           - { name: Fedora,           id: fedora   }
           - { name: Gentoo,           id: gentoo   }
           - { name: OpenSUSE,         id: opensuse }
-          - { name: Ubuntu Bionic,    id: bionic   }
     container:
       image: mesonbuild/${{ matrix.cfg.id }}:latest
-      volumes:
-        - ${{ matrix.cfg.id == 'bionic' && '/node20217:/node20217:rw,rshared' || ' ' }}
-        - ${{ matrix.cfg.id == 'bionic' && '/node20217:/__e/node20:ro,rshared' || ' ' }}
     env:
       MESON_CI_JOBNAME: linux-${{ matrix.cfg.id }}-gcc
 
     steps:
-    - name: install nodejs20glibc2.17
-      if: ${{ matrix.cfg.id == 'bionic' }}
-      run: |
-        apt install curl -y
-        curl -LO https://unofficial-builds.nodejs.org/download/release/v20.9.0/node-v20.9.0-linux-x64-glibc-217.tar.xz
-        tar -xf node-v20.9.0-linux-x64-glibc-217.tar.xz --strip-components 1 -C /node20217
-        ldd /__e/node20/bin/node
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Run tests
       # All environment variables are stored inside the docker image in /ci/env_vars.sh
@@ -72,18 +61,9 @@ jobs:
 
         source /ci/env_vars.sh
         cd $GITHUB_WORKSPACE
-        ./tools/run_with_cov.py ./run_tests.py $CI_ARGS
-
-    - name: Aggregate coverage reports
-      run: ./ci/combine_cov.sh
-
-    - name: Upload coverage report
-      uses: codecov/codecov-action@v3
-      with:
-        files: .coverage/coverage.xml
-        name: "OS Comp [${{ matrix.cfg.name }}]"
-        fail_ci_if_error: false
-        verbose: true
+        # disable git ownership checks
+        git config --global safe.directory '*'
+        ./run_tests.py $CI_ARGS
 
   pypy:
     name: 'Arch / PyPy'
@@ -172,15 +152,4 @@ jobs:
           update-alternatives --set i686-w64-mingw32-gcc   /usr/bin/i686-w64-mingw32-gcc-posix
           update-alternatives --set i686-w64-mingw32-g++   /usr/bin/i686-w64-mingw32-g++-posix
 
-          ./tools/run_with_cov.py ./run_tests.py $RUN_TESTS_ARGS -- $MESON_ARGS
-
-      - name: Aggregate coverage reports
-        run: ./ci/combine_cov.sh
-
-      - name: Upload coverage report
-        uses: codecov/codecov-action@v3
-        with:
-          files: .coverage/coverage.xml
-          name: "Ubuntu [${{ matrix.cfg.CC }} ${{ matrix.cfg.RUN_TESTS_ARGS }} ${{ matrix.cfg.MESON_ARGS }}]"
-          fail_ci_if_error: false
-          verbose: true
+          ./run_tests.py $RUN_TESTS_ARGS -- $MESON_ARGS

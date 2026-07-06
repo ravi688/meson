@@ -4,14 +4,11 @@
 
 from __future__ import annotations
 
-import copy
-
-from .interpreterobjects import extract_required_kwarg
 from .. import mlog
 from .. import dependencies
 from .. import build
 from ..wrap import WrapMode
-from ..mesonlib import extract_as_list, stringlistify, version_compare_many, listify
+from ..mesonlib import stringlistify, version_compare_many, SubProject
 from ..options import OptionKey
 from ..dependencies import Dependency, DependencyException, NotFoundDependency
 from ..interpreterbase import (MesonInterpreterObject, FeatureNew,
@@ -19,20 +16,27 @@ from ..interpreterbase import (MesonInterpreterObject, FeatureNew,
 
 import typing as T
 if T.TYPE_CHECKING:
+    from typing_extensions import TypeAlias
     from .interpreter import Interpreter
-    from ..interpreterbase import TYPE_nkwargs, TYPE_nvar
+    from .kwargs import DoSubproject
+    from ..dependencies.base import DependencyObjectKWs
+    from ..options import ElementaryOptionValues, OptionDict
     from .interpreterobjects import SubprojectHolder
+    from ..mesonlib import MachineChoice
+
+    CandidateType: TypeAlias = T.Tuple[T.Callable[[DependencyObjectKWs, str, DoSubproject], T.Optional[Dependency]], str]
 
 
 class DependencyFallbacksHolder(MesonInterpreterObject):
     def __init__(self,
                  interpreter: 'Interpreter',
-                 names: T.List[str],
+                 names: T.List[str], for_machine: MachineChoice,
                  allow_fallback: T.Optional[bool] = None,
-                 default_options: T.Optional[T.Dict[str, str]] = None) -> None:
+                 default_options: T.Optional[T.Dict[OptionKey, ElementaryOptionValues]] = None) -> None:
         super().__init__(subproject=interpreter.subproject)
         self.interpreter = interpreter
         self.subproject = interpreter.subproject
+        self.for_machine = for_machine
         self.coredata = interpreter.coredata
         self.build = interpreter.build
         self.environment = interpreter.environment
@@ -40,7 +44,7 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
         self.allow_fallback = allow_fallback
         self.subproject_name: T.Optional[str] = None
         self.subproject_varname: T.Optional[str] = None
-        self.subproject_kwargs = {'default_options': default_options or {}}
+        self.default_options = default_options or {}
         self.names: T.List[str] = []
         self.forcefallback: bool = False
         self.nofallback: bool = False
@@ -80,36 +84,32 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
         self.subproject_name = subp_name
         self.subproject_varname = varname
 
-    def _do_dependency_cache(self, kwargs: TYPE_nkwargs, func_args: TYPE_nvar, func_kwargs: TYPE_nkwargs) -> T.Optional[Dependency]:
-        name = func_args[0]
+    def _do_dependency_cache(self, kwargs: DependencyObjectKWs, name: str, func_kwargs: DoSubproject) -> T.Optional[Dependency]:
         cached_dep = self._get_cached_dep(name, kwargs)
         if cached_dep:
             self._verify_fallback_consistency(cached_dep)
         return cached_dep
 
-    def _do_dependency(self, kwargs: TYPE_nkwargs, func_args: TYPE_nvar, func_kwargs: TYPE_nkwargs) -> T.Optional[Dependency]:
+    def _do_dependency(self, kwargs: DependencyObjectKWs, name: str, func_kwargs: DoSubproject) -> T.Optional[Dependency]:
         # Note that there is no df.dependency() method, this is called for names
         # given as positional arguments to dependency_fallbacks(name1, ...).
         # We use kwargs from the dependency() function, for things like version,
         # module, etc.
-        name = func_args[0]
         self._handle_featurenew_dependencies(name)
         dep = dependencies.find_external_dependency(name, self.environment, kwargs)
         if dep.found():
-            for_machine = self.interpreter.machine_from_native_kwarg(kwargs)
             identifier = dependencies.get_dep_identifier(name, kwargs)
-            self.coredata.deps[for_machine].put(identifier, dep)
+            self.coredata.deps[self.for_machine].put(identifier, dep)
             return dep
         return None
 
-    def _do_existing_subproject(self, kwargs: TYPE_nkwargs, func_args: TYPE_nvar, func_kwargs: TYPE_nkwargs) -> T.Optional[Dependency]:
-        subp_name = func_args[0]
+    def _do_existing_subproject(self, kwargs: DependencyObjectKWs, subp_name: str, func_kwargs: DoSubproject) -> T.Optional[Dependency]:
         varname = self.subproject_varname
         if subp_name and self._get_subproject(subp_name):
             return self._get_subproject_dep(subp_name, varname, kwargs)
         return None
 
-    def _do_subproject(self, kwargs: TYPE_nkwargs, func_args: TYPE_nvar, func_kwargs: TYPE_nkwargs) -> T.Optional[Dependency]:
+    def _do_subproject(self, kwargs: DependencyObjectKWs, name: str, func_kwargs: DoSubproject) -> T.Optional[Dependency]:
         if self.forcefallback:
             mlog.log('Looking for a fallback subproject for the dependency',
                      mlog.bold(self._display_name), 'because:\nUse of fallback dependencies is forced.')
@@ -124,36 +124,29 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
         # dependency('foo', static: true) should implicitly add
         # default_options: ['default_library=static']
         static = kwargs.get('static')
-        default_options = func_kwargs.get('default_options', {})
-        if static is not None and 'default_library' not in default_options:
+        forced_options: OptionDict = {}
+        if static is not None:
             default_library = 'static' if static else 'shared'
             mlog.log(f'Building fallback subproject with default_library={default_library}')
-            default_options = copy.copy(default_options)
-            default_options['default_library'] = default_library
-            func_kwargs['default_options'] = default_options
+            forced_options[OptionKey('default_library')] = default_library
 
         # Configure the subproject
-        subp_name = self.subproject_name
+        subp_name = SubProject(self.subproject_name)
         varname = self.subproject_varname
-        func_kwargs.setdefault('version', [])
-        if 'default_options' in kwargs and isinstance(kwargs['default_options'], str):
-            func_kwargs['default_options'] = listify(kwargs['default_options'])
-        self.interpreter.do_subproject(subp_name, func_kwargs)
+        self.interpreter.do_subproject(subp_name, func_kwargs, forced_options=forced_options)
         return self._get_subproject_dep(subp_name, varname, kwargs)
 
     def _get_subproject(self, subp_name: str) -> T.Optional[SubprojectHolder]:
-        sub = self.interpreter.subprojects.get(subp_name)
+        sub = self.interpreter.subprojects[self.for_machine].get(subp_name)
         if sub and sub.found():
             return sub
         return None
 
-    def _get_subproject_dep(self, subp_name: str, varname: str, kwargs: TYPE_nkwargs) -> T.Optional[Dependency]:
+    def _get_subproject_dep(self, subp_name: str, varname: str, kwargs: DependencyObjectKWs) -> T.Optional[Dependency]:
         # Verify the subproject is found
         subproject = self._get_subproject(subp_name)
         if not subproject:
-            mlog.log('Dependency', mlog.bold(self._display_name), 'from subproject',
-                     mlog.bold(subp_name), 'found:', mlog.red('NO'),
-                     mlog.blue('(subproject failed to configure)'))
+            self._log_found(False, subproject=subp_name, extra_args=[mlog.blue('(subproject failed to configure)')])
             return None
 
         # The subproject has been configured. If for any reason the dependency
@@ -186,55 +179,63 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
                     break
         if not varname:
             mlog.warning(f'Subproject {subp_name!r} did not override {self._display_name!r} dependency and no variable name specified')
-            mlog.log('Dependency', mlog.bold(self._display_name), 'from subproject',
-                     mlog.bold(subproject.subdir), 'found:', mlog.red('NO'))
+            self._log_found(False, subproject=subproject.subdir)
             return self._notfound_dependency()
 
         var_dep = self._get_subproject_variable(subproject, varname) or self._notfound_dependency()
         if not var_dep.found():
-            mlog.log('Dependency', mlog.bold(self._display_name), 'from subproject',
-                     mlog.bold(subproject.subdir), 'found:', mlog.red('NO'))
+            self._log_found(False, subproject=subproject.subdir)
             return var_dep
 
         wanted = stringlistify(kwargs.get('version', []))
         found = var_dep.get_version()
         if not self._check_version(wanted, found):
-            mlog.log('Dependency', mlog.bold(self._display_name), 'from subproject',
-                     mlog.bold(subproject.subdir), 'found:', mlog.red('NO'),
-                     'found', mlog.normal_cyan(found), 'but need:',
-                     mlog.bold(', '.join([f"'{e}'" for e in wanted])))
+            self._log_found(False, subproject=subproject.subdir,
+                            extra_args=['found', mlog.normal_cyan(found), 'but need:',
+                                        mlog.bold(', '.join([f"'{e}'" for e in wanted]))])
             return self._notfound_dependency()
 
-        mlog.log('Dependency', mlog.bold(self._display_name), 'from subproject',
-                 mlog.bold(subproject.subdir), 'found:', mlog.green('YES'),
-                 mlog.normal_cyan(found) if found else None)
+        self._log_found(True, subproject=subproject.subdir,
+                        extra_args=[mlog.normal_cyan(found) if found else None])
         return var_dep
 
-    def _get_cached_dep(self, name: str, kwargs: TYPE_nkwargs) -> T.Optional[Dependency]:
+    def _log_found(self, found: bool, extra_args: T.Optional[mlog.TV_LoggableList] = None,
+                   subproject: T.Optional[str] = None) -> None:
+        msg: mlog.TV_LoggableList = [
+            'Dependency', mlog.bold(self._display_name),
+            'for', mlog.bold(self.for_machine.get_lower_case_name()), 'machine']
+        if subproject:
+            msg.extend(['from subproject', subproject])
+        msg.extend(['found:', mlog.red('NO') if not found else mlog.green('YES')])
+        if extra_args:
+            msg.extend(extra_args)
+
+        mlog.log(*msg)
+
+    def _get_cached_dep(self, name: str, kwargs: DependencyObjectKWs) -> T.Optional[Dependency]:
         # Unlike other methods, this one returns not-found dependency instead
         # of None in the case the dependency is cached as not-found, or if cached
         # version does not match. In that case we don't want to continue with
         # other candidates.
-        for_machine = self.interpreter.machine_from_native_kwarg(kwargs)
         identifier = dependencies.get_dep_identifier(name, kwargs)
         wanted_vers = stringlistify(kwargs.get('version', []))
 
-        override = self.build.dependency_overrides[for_machine].get(identifier)
+        info: mlog.TV_LoggableList = [mlog.blue('(cached)')]
+        override = self.build.dependency_overrides[self.for_machine].get(identifier)
         if override:
-            info = [mlog.blue('(overridden)' if override.explicit else '(cached)')]
+            if override.explicit:
+                info = [mlog.blue('(overridden)')]
             cached_dep = override.dep
             # We don't implicitly override not-found dependencies, but user could
             # have explicitly called meson.override_dependency() with a not-found
             # dep.
             if not cached_dep.found():
-                mlog.log('Dependency', mlog.bold(self._display_name),
-                         'found:', mlog.red('NO'), *info)
+                self._log_found(False, extra_args=info)
                 return cached_dep
         elif self.forcefallback and self.subproject_name:
             cached_dep = None
         else:
-            info = [mlog.blue('(cached)')]
-            cached_dep = self.coredata.deps[for_machine].get(identifier)
+            cached_dep = self.coredata.deps[self.for_machine].get(identifier)
 
         if cached_dep:
             found_vers = cached_dep.get_version()
@@ -243,16 +244,14 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
                     # We cached this dependency on disk from a previous run,
                     # but it could got updated on the system in the meantime.
                     return None
-                mlog.log('Dependency', mlog.bold(name),
-                         'found:', mlog.red('NO'),
-                         'found', mlog.normal_cyan(found_vers), 'but need:',
-                         mlog.bold(', '.join([f"'{e}'" for e in wanted_vers])),
-                         *info)
+                self._log_found(False,
+                                extra_args=['found', mlog.normal_cyan(found_vers), 'but need:',
+                                            mlog.bold(', '.join([f"'{e}'" for e in wanted_vers])),
+                                            *info])
                 return self._notfound_dependency()
             if found_vers:
                 info = [mlog.normal_cyan(found_vers), *info]
-            mlog.log('Dependency', mlog.bold(self._display_name),
-                     'found:', mlog.green('YES'), *info)
+            self._log_found(True, extra_args=info)
             return cached_dep
         return None
 
@@ -298,35 +297,34 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
             return True
         return not (found == 'undefined' or not version_compare_many(found, wanted)[0])
 
-    def _get_candidates(self) -> T.List[T.Tuple[T.Callable[[TYPE_nkwargs, TYPE_nvar, TYPE_nkwargs], T.Optional[Dependency]], TYPE_nvar, TYPE_nkwargs]]:
-        candidates = []
+    def _get_candidates(self) -> T.List[CandidateType]:
+        candidates: T.List[CandidateType] = []
         # 1. check if any of the names is cached already.
         for name in self.names:
-            candidates.append((self._do_dependency_cache, [name], {}))
+            candidates.append((self._do_dependency_cache, name))
         # 2. check if the subproject fallback has already been configured.
         if self.subproject_name:
-            candidates.append((self._do_existing_subproject, [self.subproject_name], self.subproject_kwargs))
+            candidates.append((self._do_existing_subproject, self.subproject_name))
         # 3. check external dependency if we are not forced to use subproject
         if not self.forcefallback or not self.subproject_name:
             for name in self.names:
-                candidates.append((self._do_dependency, [name], {}))
+                candidates.append((self._do_dependency, name))
         # 4. configure the subproject
         if self.subproject_name:
-            candidates.append((self._do_subproject, [self.subproject_name], self.subproject_kwargs))
+            candidates.append((self._do_subproject, self.subproject_name))
         return candidates
 
-    def lookup(self, kwargs: TYPE_nkwargs, force_fallback: bool = False) -> Dependency:
-        mods = extract_as_list(kwargs, 'modules')
+    def lookup(self, kwargs: DependencyObjectKWs, force_fallback: bool = False) -> Dependency:
+        mods = kwargs.get('modules', [])
         if mods:
             self._display_name += ' (modules: {})'.format(', '.join(str(i) for i in mods))
 
-        disabled, required, feature = extract_required_kwarg(kwargs, self.subproject)
-        if disabled:
-            mlog.log('Dependency', mlog.bold(self._display_name), 'skipped: feature', mlog.bold(feature), 'disabled')
-            return self._notfound_dependency()
+        required = kwargs.get('required', True)
 
         # Check if usage of the subproject fallback is forced
-        wrap_mode = WrapMode.from_string(self.coredata.optstore.get_value_for(OptionKey('wrap_mode')))
+        _wm = self.coredata.optstore.get_value_for(OptionKey('wrap_mode'))
+        assert isinstance(_wm, str), 'for mypy'
+        wrap_mode = WrapMode.from_string(_wm)
         force_fallback_for = self.coredata.optstore.get_value_for(OptionKey('force_fallback_for'))
         assert isinstance(force_fallback_for, list), 'for mypy'
         self.nofallback = wrap_mode == WrapMode.nofallback
@@ -359,18 +357,24 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
         # Try all candidates, only the last one is really required.
         last = len(candidates) - 1
         for i, item in enumerate(candidates):
-            func, func_args, func_kwargs = item
-            func_kwargs['required'] = required and (i == last)
+            func, name = item
             kwargs['required'] = required and (i == last)
-            dep = func(kwargs, func_args, func_kwargs)
+            func_kwargs: DoSubproject = {
+                'required': kwargs['required'],
+                'for_machine': self.for_machine,
+                'cmake_options': [],
+                'default_options': self.default_options,
+                'options': None,
+                'version': [],
+            }
+            dep = func(kwargs, name, func_kwargs)
             if dep and dep.found():
                 # Override this dependency to have consistent results in subsequent
                 # dependency lookups.
                 for name in self.names:
-                    for_machine = self.interpreter.machine_from_native_kwarg(kwargs)
                     identifier = dependencies.get_dep_identifier(name, kwargs)
-                    if identifier not in self.build.dependency_overrides[for_machine]:
-                        self.build.dependency_overrides[for_machine][identifier] = \
+                    if identifier not in self.build.dependency_overrides[self.for_machine]:
+                        self.build.dependency_overrides[self.for_machine][identifier] = \
                             build.DependencyOverride(dep, self.interpreter.current_node, explicit=False)
                 return dep
             elif required and (dep or i == last):

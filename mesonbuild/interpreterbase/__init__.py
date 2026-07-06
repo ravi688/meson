@@ -8,6 +8,7 @@ __all__ = [
     'IterableObject',
     'MutableInterpreterObject',
     'ContextManagerObject',
+    'DefaultObject',
 
     'MesonOperator',
 
@@ -25,6 +26,8 @@ __all__ = [
     'flatten',
     'resolve_second_level_holders',
     'stringifyUserArguments',
+    'Feature',
+    'FeatureValue',
 
     'noPosargs',
     'noKwargs',
@@ -32,7 +35,6 @@ __all__ = [
     'noSecondLevelHolderResolving',
     'unholder_return',
     'disablerIfNotFound',
-    'permittedKwargs',
     'typed_operator',
     'typed_pos_args',
     'ContainerTypeInfo',
@@ -47,8 +49,6 @@ __all__ = [
 
     'InterpreterBase',
 
-    'SubProject',
-
     'TV_func',
     'TYPE_elementary',
     'TYPE_var',
@@ -59,6 +59,9 @@ __all__ = [
     'TYPE_HoldableTypes',
 
     'HoldableTypes',
+
+    'UnknownValue',
+    'UndefinedVariable',
 ]
 
 from .baseobjects import (
@@ -68,6 +71,7 @@ from .baseobjects import (
     IterableObject,
     MutableInterpreterObject,
     ContextManagerObject,
+    DefaultObject,
 
     TV_func,
     TYPE_elementary,
@@ -78,9 +82,10 @@ from .baseobjects import (
     TYPE_key_resolver,
     TYPE_HoldableTypes,
 
-    SubProject,
-
     HoldableTypes,
+
+    UnknownValue,
+    UndefinedVariable,
 )
 
 from .decorators import (
@@ -90,7 +95,6 @@ from .decorators import (
     noSecondLevelHolderResolving,
     unholder_return,
     disablerIfNotFound,
-    permittedKwargs,
     typed_pos_args,
     ContainerTypeInfo,
     KwargInfo,
@@ -119,6 +123,8 @@ from .helpers import (
     flatten,
     resolve_second_level_holders,
     stringifyUserArguments,
+    Feature,
+    FeatureValue,
 )
 from .interpreterbase import InterpreterBase
 from .operator import MesonOperator

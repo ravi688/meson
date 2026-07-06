@@ -12,8 +12,9 @@ from . import ExtensionModule, ModuleReturnValue, ModuleObject, ModuleInfo
 from .. import build, mesonlib, mlog, dependencies
 from ..options import OptionKey
 from ..cmake import TargetOptions, cmake_defines_to_args
+from ..dependencies.cmake import CMakeDependency
 from ..interpreter import SubprojectHolder
-from ..interpreter.type_checking import REQUIRED_KW, INSTALL_DIR_KW, NoneType, in_set_validator
+from ..interpreter.type_checking import NATIVE_KW, REQUIRED_KW, INSTALL_DIR_KW, INCLUDE_TYPE, NoneType, in_set_validator
 from ..interpreterbase import (
     FeatureNew,
 
@@ -34,6 +35,7 @@ if T.TYPE_CHECKING:
 
     from . import ModuleState
     from ..cmake.common import SingleTargetOptions
+    from ..dependencies.base import IncludeType
     from ..environment import Environment
     from ..interpreter import Interpreter, kwargs
     from ..interpreterbase import TYPE_kwargs, TYPE_var, InterpreterObject
@@ -57,10 +59,15 @@ if T.TYPE_CHECKING:
 
         options: T.Optional[CMakeSubprojectOptions]
         cmake_options: T.List[str]
+        native: mesonlib.MachineChoice
 
     class TargetKW(TypedDict):
 
         target: T.Optional[str]
+
+    class DependencyKW(TypedDict):
+
+        include_type: IncludeType
 
 
 _TARGET_KW = KwargInfo('target', (str, NoneType))
@@ -98,7 +105,6 @@ endmacro()
 
 class CMakeSubproject(ModuleObject):
     def __init__(self, subp: SubprojectHolder):
-        assert isinstance(subp, SubprojectHolder)
         assert subp.cm_interpreter is not None
         super().__init__()
         self.subp = subp
@@ -129,17 +135,8 @@ class CMakeSubproject(ModuleObject):
         return self.subp.get_variable(args, kwargs)
 
     @typed_pos_args('cmake.subproject.dependency', str)
-    @typed_kwargs(
-        'cmake.subproject.dependency',
-        KwargInfo(
-            'include_type',
-            str,
-            default='preserve',
-            since='0.56.0',
-            validator=in_set_validator({'preserve', 'system', 'non-system'})
-        ),
-    )
-    def dependency(self, state: ModuleState, args: T.Tuple[str], kwargs: T.Dict[str, str]) -> dependencies.Dependency:
+    @typed_kwargs('cmake.subproject.dependency', INCLUDE_TYPE.evolve(since='0.56.0'))
+    def dependency(self, state: ModuleState, args: T.Tuple[str], kwargs: DependencyKW) -> dependencies.Dependency:
         info = self._args_to_info(args[0])
         if info['func'] == 'executable':
             raise InvalidArguments(f'{args[0]} is an executable and does not support the dependency() method. Use target() instead.')
@@ -154,10 +151,11 @@ class CMakeSubproject(ModuleObject):
 
     @noKwargs
     @typed_pos_args('cmake.subproject.include_directories', str)
-    def include_directories(self, state: ModuleState, args: T.Tuple[str], kwargs: TYPE_kwargs) -> build.IncludeDirs:
+    def include_directories(self, state: ModuleState, args: T.Tuple[str], kwargs: TYPE_kwargs) -> T.List[build.IncludeDirs]:
         info = self._args_to_info(args[0])
         inc = self.get_variable(state, [info['inc']], kwargs)
-        assert isinstance(inc, build.IncludeDirs), 'for mypy'
+        assert isinstance(inc, list), 'for mypy'
+        assert isinstance(inc[0], build.IncludeDirs), 'for mypy'
         return inc
 
     @noKwargs
@@ -242,7 +240,7 @@ class CMakeSubprojectOptions(ModuleObject):
 
 class CmakeModule(ExtensionModule):
     cmake_detected = False
-    cmake_root = None
+    cmake_root: str
 
     INFO = ModuleInfo('cmake', '0.50.0')
 
@@ -264,7 +262,7 @@ class CmakeModule(ExtensionModule):
         if not compiler:
             raise mesonlib.MesonException('Requires a C or C++ compiler to compute sizeof(void *).')
 
-        return compiler.sizeof('void *', '', env)[0]
+        return compiler.sizeof('void *', '')[0]
 
     def detect_cmake(self, state: ModuleState) -> bool:
         if self.cmake_detected:
@@ -274,8 +272,16 @@ class CmakeModule(ExtensionModule):
         if not cmakebin.found():
             return False
 
-        p, stdout, stderr = mesonlib.Popen_safe(cmakebin.get_command() + ['--system-information', '-G', 'Ninja'])[0:3]
-        if p.returncode != 0:
+        # Try different CMake generators since specifying no generator may fail
+        # in cygwin for some reason
+        for gen in CMakeDependency.class_cmake_generators:
+            cmd = cmakebin.get_command() + ['--system-information']
+            if gen:
+                cmd += ['-G', gen]
+            p, stdout, stderr = mesonlib.Popen_safe(cmd)[0:3]
+            if p.returncode == 0:
+                break
+        else:
             mlog.log(f'error retrieving cmake information: returnCode={p.returncode} stdout={stdout} stderr={stderr}')
             return False
 
@@ -420,6 +426,7 @@ class CmakeModule(ExtensionModule):
     @typed_kwargs(
         'cmake.subproject',
         REQUIRED_KW,
+        NATIVE_KW.evolve(since='1.12.0'),
         KwargInfo('options', (CMakeSubprojectOptions, NoneType), since='0.55.0'),
         KwargInfo(
             'cmake_options',
@@ -433,15 +440,16 @@ class CmakeModule(ExtensionModule):
     def subproject(self, state: ModuleState, args: T.Tuple[str], kwargs_: Subproject) -> T.Union[SubprojectHolder, CMakeSubproject]:
         if kwargs_['cmake_options'] and kwargs_['options'] is not None:
             raise InterpreterException('"options" cannot be used together with "cmake_options"')
-        dirname = args[0]
+        subp_name = mesonlib.SubProject(args[0])
         kw: kwargs.DoSubproject = {
             'required': kwargs_['required'],
             'options': kwargs_['options'],
             'cmake_options': kwargs_['cmake_options'],
-            'default_options': [],
+            'default_options': {},
             'version': [],
+            'for_machine': kwargs_['native'],
         }
-        subp = self.interpreter.do_subproject(dirname, kw, force_method='cmake')
+        subp = self.interpreter.do_subproject(subp_name, kw, force_method='cmake')
         if not subp.found():
             return subp
         return CMakeSubproject(subp)

@@ -4,28 +4,30 @@
 from __future__ import annotations
 
 from .base import DependencyTypeName, ExternalDependency, DependencyException
-from ..mesonlib import MesonException, Version, stringlistify
+from ..mesonlib import MesonException, Version
 from .. import mlog
 from pathlib import Path
 import typing as T
 
 if T.TYPE_CHECKING:
     from ..environment import Environment
+    from .base import DependencyObjectKWs
 
 class ExtraFrameworkDependency(ExternalDependency):
     system_framework_paths: T.Optional[T.List[str]] = None
 
-    def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any], language: T.Optional[str] = None) -> None:
-        paths = stringlistify(kwargs.get('paths', []))
-        super().__init__(DependencyTypeName('extraframeworks'), env, kwargs, language=language)
-        self.name = name
+    type_name = DependencyTypeName('extraframeworks')
+
+    def __init__(self, name: str, env: 'Environment', kwargs: DependencyObjectKWs) -> None:
+        paths = kwargs.get('paths', [])
+        super().__init__(name, env, kwargs)
         # Full path to framework directory
         self.framework_path: T.Optional[str] = None
         if not self.clib_compiler:
             raise DependencyException('No C-like compilers are available')
         if self.system_framework_paths is None:
             try:
-                self.system_framework_paths = self.clib_compiler.find_framework_paths(self.env)
+                self.system_framework_paths = self.clib_compiler.find_framework_paths()
             except MesonException as e:
                 if 'non-clang' in str(e):
                     # Apple frameworks can only be found (and used) with the
@@ -55,7 +57,7 @@ class ExtraFrameworkDependency(ExternalDependency):
             # Python.framework. We need to know for sure that the framework was
             # found in the path we expect.
             allow_system = p in self.system_framework_paths
-            args = self.clib_compiler.find_framework(framework_name, self.env, [p], allow_system)
+            args = self.clib_compiler.find_framework(framework_name, [p], allow_system)
             if args is None:
                 continue
             self.link_args = args
@@ -110,7 +112,3 @@ class ExtraFrameworkDependency(ExternalDependency):
 
     def log_info(self) -> str:
         return self.framework_path or ''
-
-    @staticmethod
-    def log_tried() -> str:
-        return 'framework'

@@ -21,6 +21,7 @@ from .misc import threads_factory
 if T.TYPE_CHECKING:
     from ..envconfig import Properties
     from ..environment import Environment
+    from .base import DependencyObjectKWs
 
 # On windows 3 directory layouts are supported:
 # * The default layout (versioned) installed:
@@ -339,21 +340,20 @@ class BoostLibraryFile():
         return [self.path.as_posix()]
 
 class BoostDependency(SystemDependency):
-    def __init__(self, environment: Environment, kwargs: T.Dict[str, T.Any]) -> None:
-        super().__init__('boost', environment, kwargs, language='cpp')
+    def __init__(self, name: str, environment: Environment, kwargs: DependencyObjectKWs) -> None:
+        kwargs['language'] = 'cpp'
+        super().__init__(name, environment, kwargs)
         buildtype = environment.coredata.optstore.get_value_for(OptionKey('buildtype'))
         assert isinstance(buildtype, str)
         self.debug = buildtype.startswith('debug')
         self.multithreading = kwargs.get('threading', 'multi') == 'multi'
 
         self.boost_root: T.Optional[Path] = None
-        self.explicit_static = 'static' in kwargs
+        self.explicit_static = kwargs.get('static') is not None
 
         # Extract and validate modules
-        self.modules: T.List[str] = mesonlib.extract_as_list(kwargs, 'modules')
+        self.modules = kwargs.get('modules', [])
         for i in self.modules:
-            if not isinstance(i, str):
-                raise DependencyException('Boost module argument is not a string.')
             if i.startswith('boost_'):
                 raise DependencyException('Boost modules must be passed without the boost_ prefix')
 
@@ -362,7 +362,7 @@ class BoostDependency(SystemDependency):
 
         # Do we need threads?
         if 'thread' in self.modules:
-            if not self._add_sub_dependency(threads_factory(environment, self.for_machine, {})):
+            if not self._add_sub_dependency(threads_factory(environment, {'native': self.for_machine})):
                 self.is_found = False
                 return
 
@@ -440,6 +440,8 @@ class BoostDependency(SystemDependency):
         mlog.debug('  - potential library dirs: {}'.format([x.as_posix() for x in lib_dirs]))
         mlog.debug('  - potential include dirs: {}'.format([x.path.as_posix() for x in inc_dirs]))
 
+        must_have_library = ['boost_python']
+
         #   2. Find all boost libraries
         libs: T.List[BoostLibraryFile] = []
         for i in lib_dirs:
@@ -452,6 +454,10 @@ class BoostDependency(SystemDependency):
                 break
         libs = sorted(set(libs))
 
+        any_libs_found = len(libs) > 0
+        if not any_libs_found:
+            return False
+
         modules = ['boost_' + x for x in self.modules]
         for inc in inc_dirs:
             mlog.debug(f'  - found boost {inc.version} include dir: {inc.path}')
@@ -462,7 +468,7 @@ class BoostDependency(SystemDependency):
                 mlog.debug(f'    - {j}')
 
             #   3. Select the libraries matching the requested modules
-            not_found: T.List[str] = []
+            not_found_as_libs: T.List[str] = []
             selected_modules: T.List[BoostLibraryFile] = []
             for mod in modules:
                 found = False
@@ -472,7 +478,24 @@ class BoostDependency(SystemDependency):
                         found = True
                         break
                 if not found:
-                    not_found += [mod]
+                    not_found_as_libs += [mod]
+
+            # If a lib is not found, but an include directory exists,
+            # assume it is a header only module.
+            not_found: T.List[str] = []
+            for boost_modulename in not_found_as_libs:
+                assert boost_modulename.startswith('boost_')
+                if boost_modulename in must_have_library:
+                    not_found.append(boost_modulename)
+                    continue
+                include_subdir = boost_modulename.replace('boost_', 'boost/', 1)
+                headerdir_found = False
+                for inc_dir in inc_dirs:
+                    if (inc_dir.path / include_subdir).is_dir():
+                        headerdir_found = True
+                        break
+                if not headerdir_found:
+                    not_found.append(boost_modulename)
 
             # log the result
             mlog.debug('  - found:')
@@ -535,7 +558,7 @@ class BoostDependency(SystemDependency):
         # given root path
 
         if use_system:
-            system_dirs_t = self.clib_compiler.get_library_dirs(self.env)
+            system_dirs_t = self.clib_compiler.get_library_dirs()
             system_dirs = [Path(x) for x in system_dirs_t]
             system_dirs = [x.resolve() for x in system_dirs if x.exists()]
             system_dirs = [x for x in system_dirs if mesonlib.path_is_in_root(x, root)]
@@ -581,11 +604,9 @@ class BoostDependency(SystemDependency):
         # MSVC is very picky with the library tags
         vscrt = ''
         try:
-            crt_val = self.env.coredata.optstore.get_value('b_vscrt')
+            crt_val = self.env.coredata.optstore.get_value_for('b_vscrt')
             assert isinstance(crt_val, str)
-            buildtype = self.env.coredata.optstore.get_value('buildtype')
-            assert isinstance(buildtype, str)
-            vscrt = self.clib_compiler.get_crt_compile_args(crt_val, buildtype)[0]
+            vscrt = self.clib_compiler.get_crt_compile_args(crt_val)[0]
         except (KeyError, IndexError, AttributeError):
             pass
 
@@ -654,7 +675,7 @@ class BoostDependency(SystemDependency):
         # Try getting the BOOST_ROOT from a boost.pc if it exists. This primarily
         # allows BoostDependency to find boost from Conan. See #5438
         try:
-            boost_pc = PkgConfigDependency('boost', self.env, {'required': False})
+            boost_pc = PkgConfigDependency('boost', self.env, {'required': False, 'native': self.for_machine})
             if boost_pc.found():
                 boost_lib_dir = boost_pc.get_variable(pkgconfig='libdir')
                 boost_inc_dir = boost_pc.get_variable(pkgconfig='includedir')

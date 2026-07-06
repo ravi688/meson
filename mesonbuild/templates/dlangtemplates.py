@@ -35,9 +35,12 @@ hello_d_meson_template = '''project(
 dependencies = [{dependencies}
 ]
 
+sources = [{source_files}
+]
+
 exe = executable(
   '{exe_name}',
-  '{source_name}',
+  sources,
   dependencies : dependencies,
   install : true,
 )
@@ -84,10 +87,12 @@ lib_d_meson_template = '''project(
 dependencies = [{dependencies}
 ]
 
+sources = [{source_files}
+]
 
 stlib = static_library(
   '{lib_name}',
-  '{source_file}',
+  sources,
   install : true,
   gnu_symbol_visibility : 'hidden',
   dependencies : dependencies,
@@ -115,10 +120,10 @@ dlang_mod = import('dlang')
 if find_program('dub', required : false).found()
   dlang_mod.generate_dub_file(
     meson.project_name().to_lower(),
-    meson.source_root(),
+    meson.project_source_root(),
     name : meson.project_name(),
-    license : meson.project_license(),
-    sourceFiles : '{source_file}',
+    license : meson.project_license()[0],
+    sourceFiles : ['{source_file}'],
     description : 'Meson sample project.',
     version : '{version}',
   )

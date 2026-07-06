@@ -3,11 +3,10 @@
 
 from __future__ import annotations
 
-import os.path, subprocess
+import os.path
 import textwrap
 import typing as T
 
-from ..mesonlib import EnvironmentException
 from ..linkers import RSPFileSyntax
 
 from .compilers import Compiler
@@ -15,7 +14,6 @@ from .mixins.islinker import BasicLinkerIsCompilerMixin
 
 if T.TYPE_CHECKING:
     from ..dependencies import Dependency
-    from ..envconfig import MachineInfo
     from ..environment import Environment
     from ..mesonlib import MachineChoice
 
@@ -35,8 +33,8 @@ class CsCompiler(BasicLinkerIsCompilerMixin, Compiler):
     language = 'cs'
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
-                 info: 'MachineInfo', runner: T.Optional[str] = None):
-        super().__init__([], exelist, version, for_machine, info)
+                 env: Environment, runner: T.Optional[str] = None):
+        super().__init__([], exelist, version, for_machine, env)
         self.runner = runner
 
     @classmethod
@@ -83,29 +81,18 @@ class CsCompiler(BasicLinkerIsCompilerMixin, Compiler):
     def get_pch_name(self, header_name: str) -> str:
         return ''
 
-    def sanity_check(self, work_dir: str, environment: 'Environment') -> None:
-        src = 'sanity.cs'
-        obj = 'sanity.exe'
-        source_name = os.path.join(work_dir, src)
-        with open(source_name, 'w', encoding='utf-8') as ofile:
-            ofile.write(textwrap.dedent('''
-                public class Sanity {
-                    static public void Main () {
-                    }
+    def _sanity_check_source_code(self) -> str:
+        return textwrap.dedent('''
+            public class Sanity {
+                static public void Main () {
                 }
-                '''))
-        pc = subprocess.Popen(self.exelist + self.get_always_args() + [src], cwd=work_dir)
-        pc.wait()
-        if pc.returncode != 0:
-            raise EnvironmentException('C# compiler %s cannot compile programs.' % self.name_string())
+            }
+            ''')
+
+    def _sanity_check_run_with_exe_wrapper(self, command: T.List[str]) -> T.List[str]:
         if self.runner:
-            cmdlist = [self.runner, obj]
-        else:
-            cmdlist = [os.path.join(work_dir, obj)]
-        pe = subprocess.Popen(cmdlist, cwd=work_dir)
-        pe.wait()
-        if pe.returncode != 0:
-            raise EnvironmentException('Executables created by Mono compiler %s are not runnable.' % self.name_string())
+            return [self.runner] + command
+        return command
 
     def needs_static_linker(self) -> bool:
         return False
@@ -122,8 +109,8 @@ class MonoCompiler(CsCompiler):
     id = 'mono'
 
     def __init__(self, exelist: T.List[str], version: str, for_machine: MachineChoice,
-                 info: 'MachineInfo'):
-        super().__init__(exelist, version, for_machine, info, runner='mono')
+                 env: Environment):
+        super().__init__(exelist, version, for_machine, env, runner='mono')
 
     def rsp_file_syntax(self) -> 'RSPFileSyntax':
         return RSPFileSyntax.GCC

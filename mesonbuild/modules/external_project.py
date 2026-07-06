@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import shlex
+import shutil
 import subprocess
 import typing as T
 
@@ -19,7 +20,7 @@ from ..interpreterbase import FeatureNew
 from ..interpreter.type_checking import ENV_KW, DEPENDS_KW
 from ..interpreterbase.decorators import ContainerTypeInfo, KwargInfo, typed_kwargs, typed_pos_args
 from ..mesonlib import (EnvironmentException, MesonException, Popen_safe, MachineChoice,
-                        get_variable_regex, do_replacement, join_args, relpath)
+                        get_variable_regex, do_replacement, join_args)
 from ..options import OptionKey
 
 if T.TYPE_CHECKING:
@@ -27,8 +28,8 @@ if T.TYPE_CHECKING:
 
     from . import ModuleState
     from .._typing import ImmutableListProtocol
-    from ..build import BuildTarget, CustomTarget
     from ..interpreter import Interpreter
+    from ..interpreter.kwargs import TargetDepends
     from ..interpreterbase import TYPE_var
     from ..mesonlib import EnvironmentVariables
     from ..utils.core import EnvironOrDict
@@ -43,7 +44,7 @@ if T.TYPE_CHECKING:
         cross_configure_options: T.List[str]
         verbose: bool
         env: EnvironmentVariables
-        depends: T.List[T.Union[BuildTarget, CustomTarget]]
+        depends: T.List[TargetDepends]
 
 
 class ExternalProject(NewExtensionModule):
@@ -57,7 +58,7 @@ class ExternalProject(NewExtensionModule):
                  cross_configure_options: T.List[str],
                  env: EnvironmentVariables,
                  verbose: bool,
-                 extra_depends: T.List[T.Union['BuildTarget', 'CustomTarget']]):
+                 extra_depends: T.List[TargetDepends]):
         super().__init__()
         self.methods.update({'dependency': self.dependency_method,
                              })
@@ -89,18 +90,28 @@ class ExternalProject(NewExtensionModule):
         self.includedir = Path(_i)
         self.name = self.src_dir.name
 
-        # On Windows if the prefix is "c:/foo" and DESTDIR is "c:/bar", `make`
-        # will install files into "c:/bar/c:/foo" which is an invalid path.
-        # Work around that issue by removing the drive from prefix.
-        if self.prefix.drive:
-            self.prefix = Path(relpath(self.prefix, self.prefix.drive))
+        self.prefix = self._cygpath_convert(self.prefix)
 
         # self.prefix is an absolute path, so we cannot append it to another path.
-        self.rel_prefix = Path(relpath(self.prefix, self.prefix.root))
+        # On Windows (where cygpath is not applied),
+        # if the prefix is "c:/foo" and DESTDIR is "c:/bar",
+        # `make` will install files into "c:/bar/c:/foo" which is an invalid path.
+        # This also removes the drive letter from the prefix to workaround the issue.
+        self.rel_prefix = self.prefix.relative_to(self.prefix.anchor)
 
         self._configure(state)
 
-        self.targets = self._create_targets(extra_depends)
+        self.targets = self._create_targets(extra_depends, state.current_build_project)
+
+    def _cygpath_convert(self, winpath: Path) -> Path:
+        # On Cygwin, MSYS2 and GitBash, the configure command and the prefix
+        # should be converted to unix style path like "/c/foo" by cygpath command,
+        # because the colon in the drive letter breaks many configure scripts.
+        # Do nothing on other environment where cygpath is not available.
+        if winpath.drive and shutil.which('cygpath'):
+            _p, o, _e = Popen_safe(['cygpath', '-u', winpath.as_posix()])
+            return Path(o.strip('\n'))
+        return winpath
 
     def _configure(self, state: 'ModuleState') -> None:
         if self.configure_command == 'waf':
@@ -116,6 +127,8 @@ class ExternalProject(NewExtensionModule):
             configure_path = Path(self.src_dir, self.configure_command)
             configure_prog = state.find_program(configure_path.as_posix())
             configure_cmd = configure_prog.get_command()
+            if len(configure_cmd) >= 2 and configure_cmd[-1] == configure_path.as_posix():
+                configure_cmd = configure_cmd[:-1] + [self._cygpath_convert(configure_path).as_posix()]
             workdir = self.build_dir
             self.make = state.find_program('make').get_command()
 
@@ -145,7 +158,7 @@ class ExternalProject(NewExtensionModule):
                 continue
             cargs = self.env.coredata.get_external_args(MachineChoice.HOST, lang)
             assert isinstance(cargs, list), 'for mypy'
-            self.run_env[ENV_VAR_PROG_MAP[lang]] = self._quote_and_join(compiler.get_exelist())
+            self.run_env[ENV_VAR_PROG_MAP[lang][0]] = self._quote_and_join(compiler.get_exelist())
             self.run_env[CFLAGS_MAPPING[lang]] = self._quote_and_join(cargs)
             if not link_exelist:
                 link_exelist = compiler.get_linker_exelist()
@@ -169,7 +182,7 @@ class ExternalProject(NewExtensionModule):
     def _quote_and_join(self, array: T.List[str]) -> str:
         return ' '.join([shlex.quote(i) for i in array])
 
-    def _validate_configure_options(self, variables: T.List[T.Tuple[str, str, str]], state: 'ModuleState') -> None:
+    def _validate_configure_options(self, variables: T.Sequence[T.Tuple[str, T.Optional[str], str]], state: 'ModuleState') -> None:
         # Ensure the user at least try to pass basic info to the build system,
         # like the prefix, libdir, etc.
         for key, default, val in variables:
@@ -183,7 +196,7 @@ class ExternalProject(NewExtensionModule):
                 FeatureNew('Default configure_option', '0.57.0').use(self.subproject, state.current_node)
                 self.configure_options.append(default)
 
-    def _format_options(self, options: T.List[str], variables: T.List[T.Tuple[str, str, str]]) -> T.List[str]:
+    def _format_options(self, options: T.List[str], variables: T.Sequence[T.Tuple[str, T.Optional[str], str]]) -> T.List[str]:
         out: T.List[str] = []
         missing = set()
         regex = get_variable_regex('meson')
@@ -201,10 +214,10 @@ class ExternalProject(NewExtensionModule):
     def _run(self, step: str, command: T.List[str], workdir: Path) -> None:
         mlog.log(f'External project {self.name}:', mlog.bold(step))
         m = 'Running command ' + str(command) + ' in directory ' + str(workdir) + '\n'
-        log_filename = Path(mlog.get_log_dir(), f'{self.name}-{step}.log')
+        logfile = Path(mlog.get_log_dir(), f'{self.name}-{step}.log')
         output = None
         if not self.verbose:
-            output = open(log_filename, 'w', encoding='utf-8')
+            output = open(logfile, 'w', encoding='utf-8')
             output.write(m + '\n')
             output.flush()
         else:
@@ -215,10 +228,13 @@ class ExternalProject(NewExtensionModule):
         if p.returncode != 0:
             m = f'{step} step returned error code {p.returncode}.'
             if not self.verbose:
-                m += '\nSee logs: ' + str(log_filename)
+                m += '\nSee logs: ' + str(logfile)
+            contents = mlog.ci_fold_file(logfile, f'CI platform detected, click here for {os.path.basename(logfile)} contents.')
+            if contents:
+                print(contents)
             raise MesonException(m)
 
-    def _create_targets(self, extra_depends: T.List[T.Union['BuildTarget', 'CustomTarget']]) -> T.List['TYPE_var']:
+    def _create_targets(self, extra_depends: T.List[TargetDepends], build_project: build.BuildProject) -> T.List['TYPE_var']:
         cmd = self.env.get_build_command()
         cmd += ['--internal', 'externalproject',
                 '--name', self.name,
@@ -234,11 +250,11 @@ class ExternalProject(NewExtensionModule):
         self.target = build.CustomTarget(
             self.name,
             self.subdir.as_posix(),
-            self.subproject,
             self.env,
             cmd + ['@OUTPUT@', '@DEPFILE@'],
             [],
             [f'{self.name}.stamp'],
+            build_project,
             depfile=f'{self.name}.d',
             console=True,
             extra_depends=extra_depends,

@@ -1,4 +1,4 @@
-.TH MESON "1" "January 2025" "meson 1.7.0" "User Commands"
+.TH MESON "1" "April 2026" "meson 1.11.0" "User Commands"
 .SH NAME
 meson - a high productivity build system
 .SH DESCRIPTION
@@ -39,6 +39,14 @@ You only need to run the Meson command once: when you first configure
 your build dir. After that you just run the build command. Meson will
 autodetect changes in your source tree and regenerate all files
 needed to build the project.
+
+Meson includes many built-in options that can be used to tweak the
+configuration of a build directory; projects can also add their
+own options.  To set values for the options, use the \-D command
+line argument like this:
+
+.B meson setup \-Dopt1=value1 \-Dopt2=value2
+.I rest of the command line...
 
 .SS "options:"
 .TP
@@ -294,6 +302,9 @@ run tests in this suite
 .TP
 \fB\-\-no\-suite\fR
 do not run tests in this suite
+.TP
+\fB\-\-exclude\fR
+do not run named tests
 .TP
 \fB\-\-no\-stdsplit\fR
 do not split stderr and stdout in test logs
@@ -671,6 +682,8 @@ could not rebuild the required targets.
 
 .SH SEE ALSO
 
-http://mesonbuild.com/
+https://mesonbuild.com/
 
 https://wrapdb.mesonbuild.com/
+
+.MR meson-reference 3

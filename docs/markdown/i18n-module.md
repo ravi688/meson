@@ -17,6 +17,8 @@ argument which is the name of the gettext module.
 
 * `args`: list of extra arguments to pass to `xgettext` when
   generating the pot file
+* `msgfmt_args`: (*Added 1.12.0*) list of extra arguments to pass to `msgfmt` when
+  building the translations
 * `data_dirs`: (*Added 0.36.0*) list of directories to be set for
   `GETTEXTDATADIRS` env var (Requires gettext 0.19.8+), used for local
   its files
@@ -83,14 +85,14 @@ i18n.xgettext(name, sources..., args: [...], recursive: false)
 ```
 
 Invokes the `xgettext` program on given sources, to generate a `.pot` file.
-This function is to be used when the `gettext` function workflow it not suitable
+This function is to be used when the `gettext` function workflow is not suitable
 for your project. For example, it can be used to produce separate `.pot` files
 for each executable.
 
 Positional arguments are the following:
 
 * name `str`: the name of the resulting pot file.
-* sources `list[str|File|build_tgt|custom_tgt]`:
+* sources `array[str|File|build_tgt|custom_tgt|custom_idx]`:
           source files or targets. May be a list of `string`, `File`, [[@build_tgt]],
           or [[@custom_tgt]] returned from other calls to this function.
 
@@ -119,5 +121,8 @@ given, all generated pot files from dependencies of the source targets are
 included to generate the final pot file. Therefore, adding a dependency to
 source target will automatically add the translations of that dependency to the
 needed translations for that source target.
+
+*New in 1.10.0* sources can be result of [[@custom_tgt]] or [[@custom_idx]].
+Before 1.10.0, custom targets were silently ignored.
 
 *Added 1.8.0*

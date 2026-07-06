@@ -19,6 +19,7 @@ if T.TYPE_CHECKING:
     from typing_extensions import TypedDict
 
     from ..environment import Environment
+    from .base import DependencyObjectKWs
 
     # Definition of what `dub describe` returns (only the fields used by Meson)
     class DubDescription(TypedDict):
@@ -67,6 +68,8 @@ class DubDependency(ExternalDependency):
     class_dubbin_searched = False
     class_cache_dir = ''
 
+    type_name = DependencyTypeName('dub')
+
     # Map Meson Compiler ID's to Dub Compiler ID's
     _ID_MAP: T.Mapping[str, str] = {
         'dmd': 'dmd',
@@ -74,17 +77,17 @@ class DubDependency(ExternalDependency):
         'llvm': 'ldc',
     }
 
-    def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
-        super().__init__(DependencyTypeName('dub'), environment, kwargs, language='d')
-        self.name = name
+    def __init__(self, name: str, environment: 'Environment', kwargs: DependencyObjectKWs):
+        kwargs['language'] = 'd'
+        super().__init__(name, environment, kwargs)
         from ..compilers.d import DCompiler, d_feature_args
 
         _temp_comp = super().get_compiler()
         assert isinstance(_temp_comp, DCompiler)
         self.compiler = _temp_comp
 
-        if 'required' in kwargs:
-            self.required = kwargs.get('required')
+        if kwargs.get('required') is not None:
+            self.required = kwargs['required']
 
         if DubDependency.class_dubbin is None and not DubDependency.class_dubbin_searched:
             DubDependency.class_dubbin = self._check_dub()
@@ -303,7 +306,7 @@ class DubDependency(ExternalDependency):
         for lib in bs['libs']:
             if os.name != 'nt':
                 # trying to add system libraries by pkg-config
-                pkgdep = PkgConfigDependency(lib, environment, {'required': True, 'silent': True})
+                pkgdep = PkgConfigDependency(lib, environment, {'required': True, 'silent': True, 'native': self.for_machine})
                 if pkgdep.is_found:
                     for arg in pkgdep.get_compile_args():
                         self.compile_args.append(arg)
@@ -348,13 +351,15 @@ class DubDependency(ExternalDependency):
         ret, res, err = self._call_dubbin(describe_cmd)
         if ret == 0:
             return (json.loads(res), helper_build, source)
+        else:
+            mlog.debug('DUB describe (raw) failed: ' + err)
 
         pack_spec = self.name
         if self.version_reqs is not None:
             if len(self.version_reqs) > 1:
                 mlog.error('Multiple version requirements are not supported for raw dub dependencies.')
                 mlog.error("Please specify only an exact version like '1.2.3'")
-                raise DependencyException('Multiple version requirements are not solvable for raw dub depencies')
+                raise DependencyException('Multiple version requirements are not solvable for raw dub dependencies')
             elif len(self.version_reqs) == 1:
                 pack_spec += '@' + self.version_reqs[0]
 

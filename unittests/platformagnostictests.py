@@ -15,14 +15,14 @@ from unittest import skipIf, SkipTest
 from pathlib import Path
 
 from .baseplatformtests import BasePlatformTests
-from .helpers import is_ci
+from .helpers import *
 from mesonbuild.mesonlib import EnvironmentVariables, ExecutableSerialisation, MesonException, is_linux, python_command, windows_proof_rmtree
 from mesonbuild.mformat import Formatter, match_path
 from mesonbuild.optinterpreter import OptionInterpreter, OptionException
 from mesonbuild.options import OptionStore
 from run_tests import Backend
 
-@skipIf(is_ci() and not is_linux(), "Run only on fast platforms")
+@skipIf(IS_CI and not is_linux(), "Run only on fast platforms")
 class PlatformAgnosticTests(BasePlatformTests):
     '''
     Tests that does not need to run on all platforms during CI
@@ -94,6 +94,23 @@ class PlatformAgnosticTests(BasePlatformTests):
     def test_python_dependency_without_pkgconfig(self):
         testdir = os.path.join(self.unit_test_dir, '103 python without pkgconfig')
         self.init(testdir, override_envvars={'PKG_CONFIG': 'notfound'})
+
+    def test_vala_target_with_internal_glib(self):
+        testdir = os.path.join(self.unit_test_dir, '132 vala internal glib')
+        for run in [{ 'version': '2.84.4', 'expected': '2.84'}, { 'version': '2.85.2', 'expected': '2.84' }]:
+            self.new_builddir()
+            self.init(testdir, extra_args=[f'-Dglib-version={run["version"]}'])
+            try:
+                with open(os.path.join(self.builddir, 'meson-info', 'intro-targets.json'), 'r', encoding='utf-8') as tgt_intro:
+                    intro = json.load(tgt_intro)
+                    target = list(filter(lambda tgt: tgt['name'] == 'vala-tgt', intro))
+                    self.assertLength(target, 1)
+                    sources = target[0]['target_sources']
+                    vala_sources = filter(lambda src: src.get('language') == 'vala', sources)
+                    for src in vala_sources:
+                        self.assertIn(('--target-glib', run['expected']), zip(src['parameters'], src['parameters'][1:]))
+            except FileNotFoundError:
+                self.skipTest('Current backend does not produce introspection data')
 
     def test_debug_function_outputs_to_meson_log(self):
         testdir = os.path.join(self.unit_test_dir, '105 debug function')
@@ -175,7 +192,7 @@ class PlatformAgnosticTests(BasePlatformTests):
         with self.subTest('Changing the backend'):
             with self.assertRaises(subprocess.CalledProcessError) as cm:
                 self.setconf('-Dbackend=none')
-            self.assertIn("ERROR: Tried to modify read only option 'backend'", cm.exception.stdout)
+            self.assertIn('ERROR: Tried to modify read only option "backend"', cm.exception.stdout)
 
         # Check that the new value was not written in the store.
         with self.subTest('option is stored correctly'):
@@ -190,8 +207,8 @@ class PlatformAgnosticTests(BasePlatformTests):
     def test_validate_dirs(self):
         testdir = os.path.join(self.common_test_dir, '1 trivial')
 
-        # Using parent as builddir should fail
-        self.builddir = os.path.dirname(self.builddir)
+        # Using parent as source directory should fail
+        self.builddir = os.path.dirname(os.getcwd())
         with self.assertRaises(subprocess.CalledProcessError) as cm:
             self.init(testdir)
         self.assertIn('cannot be a parent of source directory', cm.exception.stdout)
@@ -203,10 +220,10 @@ class PlatformAgnosticTests(BasePlatformTests):
         # Reconfigure of not empty builddir should work
         self.new_builddir()
         Path(self.builddir, 'dummy').touch()
-        self.init(testdir, extra_args=['--reconfigure'])
+        self.init(testdir, extra_args=['--reconfigure', '--buildtype=custom'])
 
         # Setup a valid builddir should update options but not reconfigure
-        self.assertEqual(self.getconf('buildtype'), 'debug')
+        self.assertEqual(self.getconf('buildtype'), 'custom')
         o = self.init(testdir, extra_args=['-Dbuildtype=release'])
         self.assertIn('Directory already configured', o)
         self.assertNotIn('The Meson build system', o)
@@ -279,10 +296,10 @@ class PlatformAgnosticTests(BasePlatformTests):
                 data = json.load(f)['meson']
 
         with open(os.path.join(testdir, 'expected_mods.json'), encoding='utf-8') as f:
-            expected = json.load(f)['meson']['modules']
+            expected = json.load(f)['meson']
 
-        self.assertEqual(data['modules'], expected)
-        self.assertEqual(data['count'], 70)
+        self.assertEqual(data['modules'], expected['modules'])
+        self.assertEqual(data['count'], expected['count'])
 
     def test_meson_package_cache_dir(self):
         # Copy testdir into temporary directory to not pollute meson source tree.
@@ -405,7 +422,7 @@ class PlatformAgnosticTests(BasePlatformTests):
         self.assertIn(f'Did you mean to run meson from the directory: "{testdir}"?', out)
 
     def test_reconfigure_base_options(self):
-        testdir = os.path.join(self.unit_test_dir, '123 reconfigure base options')
+        testdir = os.path.join(self.unit_test_dir, '124 reconfigure base options')
         out = self.init(testdir, extra_args=['-Db_ndebug=true'])
         self.assertIn('\nMessage: b_ndebug: true\n', out)
         self.assertIn('\nMessage: c_std: c89\n', out)
@@ -421,12 +438,12 @@ class PlatformAgnosticTests(BasePlatformTests):
 
         with self.subTest('unknown user option'):
             out = self.init(testdir, extra_args=['-Dnot_an_option=1'], allow_fail=True)
-            self.assertIn('ERROR: Unknown options: "not_an_option"', out)
+            self.assertIn('ERROR: Unknown option: "not_an_option"', out)
 
         with self.subTest('unknown builtin option'):
             self.new_builddir()
             out = self.init(testdir, extra_args=['-Db_not_an_option=1'], allow_fail=True)
-            self.assertIn('ERROR: Unknown options: "b_not_an_option"', out)
+            self.assertIn('ERROR: Unknown option: "b_not_an_option"', out)
 
 
     def test_configure_new_option(self) -> None:
@@ -451,7 +468,17 @@ class PlatformAgnosticTests(BasePlatformTests):
                 f.write(line)
         with self.assertRaises(subprocess.CalledProcessError) as e:
             self.setconf('-Dneg_int_opt=0')
-        self.assertIn('Unknown options: ":neg_int_opt"', e.exception.stdout)
+        self.assertIn('Unknown option: "neg_int_opt"', e.exception.stdout)
+
+    def test_reconfigure_option(self) -> None:
+        testdir = self.copy_srcdir(os.path.join(self.common_test_dir, '40 options'))
+        self.init(testdir)
+        self.assertEqual(self.getconf('neg_int_opt'), -3)
+        with self.assertRaises(subprocess.CalledProcessError) as e:
+            self.init(testdir, extra_args=['--reconfigure', '-Dneg_int_opt=0'])
+        self.assertEqual(self.getconf('neg_int_opt'), -3)
+        self.init(testdir, extra_args=['--reconfigure', '-Dneg_int_opt=-2'])
+        self.assertEqual(self.getconf('neg_int_opt'), -2)
 
     def test_configure_option_changed_constraints(self) -> None:
         """Changing the constraints of an option without reconfiguring should work."""
@@ -491,7 +518,7 @@ class PlatformAgnosticTests(BasePlatformTests):
         os.unlink(os.path.join(testdir, 'meson_options.txt'))
         with self.assertRaises(subprocess.CalledProcessError) as e:
             self.setconf('-Dneg_int_opt=0')
-        self.assertIn('Unknown options: ":neg_int_opt"', e.exception.stdout)
+        self.assertIn('Unknown option: "neg_int_opt"', e.exception.stdout)
 
     def test_configure_options_file_added(self) -> None:
         """A new project option file should be detected."""
@@ -533,3 +560,105 @@ class PlatformAgnosticTests(BasePlatformTests):
         self.clean()
 
         self._run(self.mtest_command + ['runner-with-exedep'])
+
+    def test_buildtype_debug_optimization_override(self) -> None:
+        """Explicitly setting debug or optimization should override buildtype."""
+        testdir = os.path.join(self.common_test_dir, '1 trivial')
+
+        for extra_args in [['--debug', '--buildtype=release'],
+                           ['-Ddebug=true', '--buildtype=release'],
+                           ['-Ddebug=true', '-Dbuildtype=release'],
+                           ['--debug', '-Dbuildtype=release']]:
+            with self.subTest(extra_args=extra_args):
+                self.new_builddir()
+                self.init(testdir, extra_args=extra_args)
+                opts = self.introspect('--buildoptions')
+                self.assertEqual(self.getconf('buildtype', opts), 'release')
+                self.assertEqual(self.getconf('debug', opts), True)
+                self.assertEqual(self.getconf('optimization', opts), '3')
+
+        for extra_args in [['--optimization=3', '--buildtype=debug'],
+                           ['-Doptimization=3', '--buildtype=debug'],
+                           ['-Doptimization=3', '-Dbuildtype=debug'],
+                           ['--optimization=3', '-Dbuildtype=debug']]:
+            with self.subTest(extra_args=extra_args):
+                self.new_builddir()
+                self.init(testdir, extra_args=extra_args)
+                opts = self.introspect('--buildoptions')
+                self.assertEqual(self.getconf('buildtype', opts), 'debug')
+                self.assertEqual(self.getconf('debug', opts), True)
+                self.assertEqual(self.getconf('optimization', opts), '3')
+
+    def test_setup_mixed_long_short_options(self) -> None:
+        """Mixing unity and unity_size as long and short options should work."""
+        testdir = self.copy_srcdir(os.path.join(self.common_test_dir, '1 trivial'))
+        self.init(testdir, extra_args=['-Dunity=on', '--unity-size=123'])
+
+    def test_minit_executable_with_matching_source(self) -> None:
+        """meson init --executable bar with bar.c present must not create a spurious project-name.c"""
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, 'bar.c').write_text('int main() {}', encoding='utf-8')
+            self._run(self.meson_command + ['init', '--name', 'foo', '--executable', 'bar', '--language', 'c'], workdir=d)
+            files = {p.name for p in Path(d).iterdir()}
+            self.assertIn('meson.build', files)
+            self.assertNotIn('foo.c', files, 'spurious foo.c was created')
+            meson_build = Path(d, 'meson.build').read_text(encoding='utf-8')
+            self.assertNotIn("'foo.c'", meson_build, 'spurious foo.c listed in meson.build')
+            self.assertIn("'bar.c'", meson_build, 'existing bar.c not listed in meson.build')
+
+    def test_minit_multi_file_keeps_existing_sources(self) -> None:
+        """meson init without --executable must create a new source file alongside existing ones"""
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, 'bar.c').write_text('int bar() {}', encoding='utf-8')
+            Path(d, 'foo.c').write_text('int main() {}', encoding='utf-8')
+            self._run(self.meson_command + ['init', '--name', 'foo', '--language', 'c'], workdir=d)
+            files = {p.name for p in Path(d).iterdir()}
+            self.assertIn('meson.build', files)
+            meson_build = Path(d, 'meson.build').read_text(encoding='utf-8')
+            self.assertIn("'foo.c'", meson_build, 'existing foo.c not listed in meson.build')
+            self.assertIn("'bar.c'", meson_build, 'existing bar.c not listed in meson.build')
+
+    def test_minit_wrong_name_creates_sample(self) -> None:
+        """meson init in an empty directory must create a sample source file"""
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, 'bar.c').write_text('int main() {}', encoding='utf-8')
+            self._run(self.meson_command + ['init', '--name', 'foo', '--language', 'c'], workdir=d)
+            files = {p.name for p in Path(d).iterdir()}
+            self.assertIn('meson.build', files)
+            self.assertIn('foo.c', files)
+            meson_build = Path(d, 'meson.build').read_text(encoding='utf-8')
+            self.assertIn("'foo.c'", meson_build, 'created foo.c not listed in meson.build')
+            self.assertNotIn("'bar.c'", meson_build, 'existing bar.c listed in meson.build')
+
+    def test_minit_empty_dir_creates_sample(self) -> None:
+        """meson init in an empty directory must create a sample source file"""
+        with tempfile.TemporaryDirectory() as d:
+            self._run(self.meson_command + ['init', '--name', 'foo', '--language', 'c'], workdir=d)
+            files = {p.name for p in Path(d).iterdir()}
+            self.assertIn('meson.build', files)
+            self.assertIn('foo.c', files)
+            meson_build = Path(d, 'meson.build').read_text(encoding='utf-8')
+            self.assertIn("'foo.c'", meson_build, 'created foo.c not listed in meson.build')
+
+    def test_readonly_sourcedir(self) -> None:
+        """Test building with read-only source directory."""
+        testdir = self.copy_srcdir(os.path.join(self.common_test_dir, '233 wrap case'))
+
+        # Make the source directory and all its contents read-only recursively
+        # Keep execute permission on directories
+        for dir, _, files in os.walk(testdir):
+            os.chmod(dir, 0o555)
+            for file in files:
+                filepath = os.path.join(dir, file)
+                os.chmod(filepath, 0o444)
+
+        self.init(testdir)
+        self.build()
+
+    @skip_if_not_language('java')
+    def test_java_build_subdir_correct_deps(self):
+        """Test that jar() with build_subdir sources does not rebuild unnecessarily."""
+        testdir = os.path.join(self.src_root, 'test cases', 'java', '11 build subdir')
+        self.init(testdir)
+        self.build()
+        self.assertBuildIsNoop()

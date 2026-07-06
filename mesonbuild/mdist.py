@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import abc
 import argparse
-import gzip
+import itertools
 import os
 import sys
 import shlex
@@ -21,18 +21,19 @@ import typing as T
 from dataclasses import dataclass
 from glob import glob
 from pathlib import Path
-from mesonbuild.environment import Environment, detect_ninja
-from mesonbuild.mesonlib import (GIT, MesonException, RealPathAction, get_meson_command, quiet_git,
-                                 windows_proof_rmtree, setup_vsenv)
+from mesonbuild.environment import Environment
+from mesonbuild.tooldetect import detect_ninja
+from mesonbuild.mesonlib import (GIT, MesonException, RealPathAction, SimpleABC, get_meson_command, quiet_git,
+                                 windows_proof_rmtree, setup_vsenv, determine_worker_count, unwrap_err)
 from .options import OptionKey
 from mesonbuild.msetup import add_arguments as msetup_argparse
 from mesonbuild.wrap import wrap
-from mesonbuild import mlog, build, coredata
+from mesonbuild import mlog, build, cmdline
 from .scripts.meson_exe import run_exe
 
 if T.TYPE_CHECKING:
     from ._typing import ImmutableListProtocol
-    from .mesonlib import ExecutableSerialisation
+    from .mesonlib import ExecutableSerialisation, SubProject
 
 archive_choices = ['bztar', 'gztar', 'xztar', 'zip']
 
@@ -40,6 +41,9 @@ archive_extension = {'bztar': '.tar.bz2',
                      'gztar': '.tar.gz',
                      'xztar': '.tar.xz',
                      'zip': '.zip'}
+
+if sys.version_info >= (3, 14):
+    tarfile.TarFile.extraction_filter = staticmethod(tarfile.fully_trusted_filter)
 
 # Note: when adding arguments, please also add them to the completion
 # scripts in $MESONSRC/data/shell-completions/
@@ -54,6 +58,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         help='Include source code of subprojects that have been used for the build.')
     parser.add_argument('--no-tests', action='store_true',
                         help='Do not build and test generated packages.')
+    parser.add_argument('-j', '--num-processes', default=determine_worker_count(), type=int,
+                        help='How many parallel processes to use (e.g. for compilation and testing).')
 
 
 def create_hash(fname: str) -> None:
@@ -116,12 +122,12 @@ def is_hg(src_root: str) -> bool:
 
 
 @dataclass
-class Dist(metaclass=abc.ABCMeta):
+class Dist(metaclass=SimpleABC):
     dist_name: str
     src_root: str
     bld_root: str
     dist_scripts: T.List[ExecutableSerialisation]
-    subprojects: T.Dict[str, str]
+    subprojects: T.Dict[SubProject, str]
     options: argparse.Namespace
 
     def __post_init__(self) -> None:
@@ -294,6 +300,7 @@ class HgDist(Dist):
                 shutil.copyfileobj(tf, bf)
             output_names.append(bz2name)
         if 'gztar' in archives:
+            import gzip
             with gzip.open(gzname, 'wb') as zf, open(tarname, 'rb') as tf:
                 shutil.copyfileobj(tf, zf)
             output_names.append(gzname)
@@ -321,7 +328,7 @@ def run_dist_steps(meson_command: T.List[str], unpacked_src_dir: str, builddir: 
         return 1
     return 0
 
-def check_dist(packagename: str, _meson_command: ImmutableListProtocol[str], extra_meson_args: T.List[str], bld_root: str, privdir: str) -> int:
+def check_dist(packagename: str, _meson_command: ImmutableListProtocol[str], extra_meson_args: T.List[str], bld_root: str, privdir: str, num_processes: int = 1) -> int:
     print(f'Testing distribution package {packagename}')
     unpackdir = os.path.join(privdir, 'dist-unpack')
     builddir = os.path.join(privdir, 'dist-build')
@@ -330,7 +337,8 @@ def check_dist(packagename: str, _meson_command: ImmutableListProtocol[str], ext
         if os.path.exists(p):
             windows_proof_rmtree(p)
         os.mkdir(p)
-    ninja_args = detect_ninja()
+    ninja = unwrap_err(detect_ninja(), 'Ninja is required but could not be found')
+    ninja_args = ninja + [f'-j{num_processes}']
     shutil.unpack_archive(packagename, unpackdir)
     unpacked_files = glob(os.path.join(unpackdir, '*'))
     assert len(unpacked_files) == 1
@@ -353,11 +361,11 @@ def check_dist(packagename: str, _meson_command: ImmutableListProtocol[str], ext
 def create_cmdline_args(bld_root: str) -> T.List[str]:
     parser = argparse.ArgumentParser()
     msetup_argparse(parser)
-    args = T.cast('coredata.SharedCMDOptions', parser.parse_args([]))
-    coredata.parse_cmd_line_options(args)
-    coredata.read_cmd_line_file(bld_root, args)
+    args = T.cast('cmdline.SharedCMDOptions', parser.parse_args([]))
+    cmdline.parse_cmd_line_options(args)
+    cmdline.read_cmd_line_file(bld_root, args)
     args.cmd_line_options.pop(OptionKey('backend'), '')
-    return shlex.split(coredata.format_cmd_line_options(args))
+    return shlex.split(cmdline.format_cmd_line_options(args))
 
 def determine_archives_to_generate(options: argparse.Namespace) -> T.List[str]:
     result = []
@@ -380,17 +388,20 @@ def run(options: argparse.Namespace) -> int:
     bld_root = b.environment.build_dir
     priv_dir = os.path.join(bld_root, 'meson-private')
 
-    dist_name = b.project_name + '-' + b.project_version
+    dist_name = b.project_name
+    if b.project_version is not None:
+        dist_name = f'{dist_name}-{b.project_version}'
 
     archives = determine_archives_to_generate(options)
 
-    subprojects = {}
+    subprojects: T.Dict[SubProject, str] = {}
     extra_meson_args = []
     if options.include_subprojects:
         subproject_dir = os.path.join(src_root, b.subproject_dir)
-        for sub in b.subprojects:
-            directory = wrap.get_directory(subproject_dir, sub)
-            subprojects[sub] = os.path.join(b.subproject_dir, directory)
+        for sub in set(itertools.chain(b.projects.host, b.projects.build)):
+            if sub:
+                directory = wrap.get_directory(subproject_dir, sub)
+                subprojects[sub] = os.path.join(b.subproject_dir, directory)
         extra_meson_args.append('-Dwrap_mode=nodownload')
 
     cls: T.Type[Dist]
@@ -413,7 +424,7 @@ def run(options: argparse.Namespace) -> int:
     rc = 0
     if not options.no_tests:
         # Check only one.
-        rc = check_dist(names[0], get_meson_command(), extra_meson_args, bld_root, priv_dir)
+        rc = check_dist(names[0], get_meson_command(), extra_meson_args, bld_root, priv_dir, options.num_processes)
     if rc == 0:
         for name in names:
             create_hash(name)

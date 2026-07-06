@@ -28,21 +28,21 @@
 %meson_build \
     %{shrink:%{__meson} compile \
         -C %{_vpath_builddir} \
-        -j %{_smp_build_ncpus} \
-        %{?__meson_verbose:--verbose} \
+        %{_smp_mflags} \
+        %[ 0%{?__meson_verbose} ? "--verbose" : "" ] \
         %{nil}}
 
 %meson_install \
     %{shrink:DESTDIR=%{buildroot} %{__meson} install \
         -C %{_vpath_builddir} \
         --no-rebuild \
-        %{!?__meson_verbose:--quiet} \
+        %[ ! 0%{?__meson_verbose} ? "--quiet" : "" ] \
         %{nil}}
 
 %meson_test \
     %{shrink:%{__meson} test \
         -C %{_vpath_builddir} \
-        --num-processes %{_smp_build_ncpus} \
+        %{_smp_mflags} \
         --print-errorlogs \
         %{nil}}
 
