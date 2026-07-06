@@ -56,6 +56,8 @@ WHITELIST_SUBDOMAIN = 'wrapdb.mesonbuild.com'
 
 ALL_TYPES = ['file', 'path', 'git', 'hg', 'svn', 'redirect']
 
+PATCH = shutil.which('patch')
+
 if sys.version_info >= (3, 14):
     import tarfile
     tarfile.TarFile.extraction_filter = staticmethod(tarfile.fully_trusted_filter)
