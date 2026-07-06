@@ -31,7 +31,7 @@ fi
 # On Proxmox containers, the path /usr/local/bin is not added to PATH variable by default
 export PATH=$PATH:/usr/local/bin
 # Package meson into one executable
-$NO_ROOT pyinstaller --onefile --clean --runtime-hook=runtime_hook.py --add-data "$(python -m certifi):certifi" --add-data "mesonbuild:mesonbuild" meson.py
+$NO_ROOT pyinstaller --onefile --clean --runtime-hook=runtime_hook.py --add-data "$(python3 -m certifi):certifi" --add-data "mesonbuild:mesonbuild" meson.py
 
 if [ -z $INSTALL_PREFIX ]; then
 	INSTALL_PREFIX="/usr"
