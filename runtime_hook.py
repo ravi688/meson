@@ -1,6 +1,7 @@
 import os
 import certifi
 import shutil
+import sys
 
 def detect_os():
     if "MSYSTEM" in os.environ:
